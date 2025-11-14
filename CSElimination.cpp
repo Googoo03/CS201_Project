@@ -172,7 +172,8 @@ struct Definition{
 };
 
 struct ReachingDefs{
-  std::unordered_map<llvm::BasicBlock*, std::set<Definition*>> reachDefs;
+  std::unordered_map<llvm::BasicBlock*, std::set<Definition*>> IN;
+  std::unordered_map<llvm::BasicBlock*, std::set<Definition*>> OUT;
 
 
   ReachingDefs(){}
@@ -226,6 +227,43 @@ struct ReachingDefs{
     }
 
     //Actual reaching definition pass here
+
+    //initialize the in out sets
+    for(auto& basic_block : F){
+      OUT[&basic_block] = genSets[&basic_block]; 
+    }
+
+    bool change = false;
+
+    while(change){
+      //compute the in and out sets of each block
+      for(auto& basic_block : F){
+        std::set<Definition*> oldIN = IN[&basic_block];
+        std::set<Definition*> oldOUT = OUT[&basic_block];
+
+        //IN is the union of all predecessors
+        for(auto i = pred_begin(&basic_block); i != pred_end(&basic_block); ++i){
+          for(Definition* def : OUT[*i]){
+            IN[&basic_block].insert(def);
+          }
+        }
+
+        //compute difference
+        std::set<Definition*> diff;
+        for(Definition* def : IN[&basic_block]){
+          if(killSets[&basic_block].find(def) == killSets[&basic_block].end()){
+            diff.insert(def);
+          }
+        }
+
+        //compute out = gen u (in - kill)
+        OUT[&basic_block] = genSets[&basic_block];
+        for(Definition* def : diff){
+          OUT[&basic_block].insert(def);
+        }
+
+      }
+    }
 
     ///////////////////////////////////////
 
