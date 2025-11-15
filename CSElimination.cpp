@@ -280,22 +280,90 @@ struct ReachingDefs{
   }
 };
 
-
-
-
 struct CSElimination : public FunctionPass
 {
   static char ID;
   CSElimination() : FunctionPass(ID) {}
 
-  bool runOnFunction(Function &F) override
-  {
-    for (auto &basic_block : F)
-      {
+bool runOnFunction(Function &F) override {
+    // ... (Setup/Run AvailableExpr AE) ...
+    AvailableExpr AE;
+    ReachingDefs RD;
+    bool changed = false;
+    for (auto &basic_block : F) {
+        // knownExpressions map: Expression* -> Instruction*
+        // This holds the Instruction that is the canonical definition for an available Expression.
+        // It's crucial for CSE to know which instruction to replace the use with.
+        std::unordered_map<Expression*, Instruction*> knownExpressions;
+        AE.runAvailableExpr(F,knownExpressions);
+        RD.runReachingDefs(F,knownExpressions);
 
+        // --- Step 1: Initialize knownExpressions from IN set (Simplification) ---
+        // In a full implementation, you'd iterate through predecessors' OUT sets
+        // to find the *actual* instruction that computed each available expression.
+        // For this example, we'll focus on the in-block generation/killing.
+
+        // Loop through all instructions in the current block
+        for (auto I = basic_block.begin(); I != basic_block.end(); /* No increment here */) {
+            Instruction *CurrentInst = &(*I);
+            I++; // Increment iterator safely before potential erasure
+
+            // Skip non-value instructions (Stores, Branches, etc.)
+            if (CurrentInst->getType()->isVoidTy() || CurrentInst->isTerminator()) {
+                // If it's a store, you'd perform the Kill operation here.
+                continue;
+            }
+
+            // --- Step 2: Create the Expression for the current Instruction ---
+            std::vector<Value*> ops;
+            for(unsigned i = 0; i < CurrentInst->getNumOperands(); ++i) {
+                // Skip non-value operands (like block addresses, metadata)
+                if (isa<BasicBlock>(CurrentInst->getOperand(i))) continue;
+                ops.push_back(CurrentInst->getOperand(i));
+            }
+
+            // Use a unique pointer for the temporary expression object for lookup
+            Expression TempExpr(CurrentInst->getOpcode(), ops);
+
+            Instruction *PrevInst = nullptr;
+            
+            // --- Step 3: Look Up (Substitution) ---
+            // Search through the currently known expressions to see if TempExpr is available
+            for (auto const& [expr_ptr, inst_ptr] : knownExpressions) {
+                if (*expr_ptr == TempExpr) {
+                    PrevInst = inst_ptr;
+                    break;
+                }
+            }
+
+            if (PrevInst) {
+                // Redundant computation found! Perform the substitution.
+                CurrentInst->replaceAllUsesWith(PrevInst);
+                CurrentInst->eraseFromParent();
+                changed = true;
+                continue; // Move to the next instruction
+            }
+
+            // --- Step 4: Generation ---
+            // The instruction is not redundant. It is now the *canonical definition*
+            // for this expression within the block. We must add it to the known set.
+            
+            // IMPORTANT: You need to ensure the Expression* added to the map is unique and persistent.
+            // Since you were collecting allExprs globally, you should reuse an existing one or
+            // create a new one and add it to allExprs.
+            
+            // For a complete solution, you'd need a way to look up the persistent Expression*
+            // from the global allExprs set using TempExpr.
+            
+            // For a simpler, in-block only demonstration:
+            Expression* NewExpr = new Expression(CurrentInst->getOpcode(), ops);
+            knownExpressions[NewExpr] = CurrentInst;
+        }
       }
-    return true; // Indicate this is a Transform pass
-  }
+      errs() << F;
+
+    return changed;
+}
 }; // end of struct CSElimination
 } // end of anonymous namespace
 
