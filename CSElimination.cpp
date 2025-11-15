@@ -36,7 +36,8 @@ struct Expression{
 
   //Contains all the available expression in each basic block
 struct AvailableExpr{
-  std::unordered_map<llvm::BasicBlock*, std::unordered_set<Expression*>> availExprs;
+  std::unordered_map<llvm::BasicBlock*, std::unordered_set<Expression*>> IN;
+  std::unordered_map<llvm::BasicBlock*, std::unordered_set<Expression*>> OUT;
 
   AvailableExpr(){}
 
@@ -117,46 +118,51 @@ struct AvailableExpr{
     //eventually it'll stabilize
     //you have to compare the previous set and the current set
     //set the unordered map at the end
+    
+    //initialize all IN and OUT sets of the CFG
+    for(auto &basic_block : F){
+
+      //if num of predeccessors is 0, i.e. is the start node, initialize IN to be empty
+      if(std::distance(pred_begin(&basic_block), pred_end(&basic_block)) == 0) continue;
+
+      //otherwise, set to all expr
+      IN[&basic_block] = allExprs;
+    }
 
     bool changes = true;
     while(changes){
-      changes = false;
-      for (auto &basic_block : F)
-      {
-        std::unordered_set<Expression*> newSet;
+      //compute the in and out sets of each block
+      for(auto& basic_block : F){
+        std::unordered_set<Expression*> oldIN = IN[&basic_block];
+        std::unordered_set<Expression*> oldOUT = OUT[&basic_block];
 
-        //intersection of all predecessors
-        bool firstPred = true;
-        for(auto pred = pred_begin(&basic_block); pred != pred_end(&basic_block); ++pred){
-          if(firstPred){
-            newSet = availExprs[*pred];
-            firstPred = false;
-          } else {
-            std::unordered_set<Expression*> tempSet;
-            for(auto expr: newSet){
-              if(availExprs[*pred].count(expr)){
-                tempSet.insert(expr);
-              }
+        //IN is the intersection of all predecessors
+        std::unordered_set<Expression*> intersection = OUT[*pred_begin(&basic_block)];
+        for(auto i = pred_begin(&basic_block); i != pred_end(&basic_block); ++i){
+          for(Expression* expr : OUT[*i]){
+            if(OUT[*i].find(expr) == OUT[*i].end()){
+              intersection.erase(expr);
             }
-            newSet = tempSet;
           }
         }
 
-        //remove kill set
-        for(auto expr: killSets[&basic_block]){
-          newSet.erase(expr);
+        //compute difference
+        std::unordered_set<Expression*> diff;
+        for(Expression* expr : IN[&basic_block]){
+          if(killSets[&basic_block].find(expr) == killSets[&basic_block].end()){
+            diff.insert(expr);
+          }
         }
 
-        //add gen set
-        for(auto expr: genSets[&basic_block]){
-          newSet.insert(expr);
+        //compute out = gen u (in - kill)
+        OUT[&basic_block] = genSets[&basic_block];
+        for(Expression* expr : diff){
+          OUT[&basic_block].insert(expr);
         }
 
-        //check if changed
-        if(newSet != availExprs[&basic_block]){
-          changes = true;
-          availExprs[&basic_block] = newSet;
-        }
+        //set changes based on if theres any differences in the sets
+        if(oldIN != IN[&basic_block] || oldOUT != OUT[&basic_block]) changes = true;
+
       }
     }
 
@@ -261,6 +267,9 @@ struct ReachingDefs{
         for(Definition* def : diff){
           OUT[&basic_block].insert(def);
         }
+
+        //set change based on if theres any differences in the sets
+        if(oldIN != IN[&basic_block] || oldOUT != OUT[&basic_block]) change = true;
 
       }
     }
