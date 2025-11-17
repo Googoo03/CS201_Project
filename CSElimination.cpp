@@ -31,21 +31,70 @@ struct Expression{
   bool operator==(const Expression& rhs) const {
     return this->opcode == rhs.opcode && this->operands == rhs.operands;
   }
+
+  bool operator!=(const Expression& rhs) const {
+    return !(*this == rhs);
+  }
 };
+
+struct ExpressionHash {
+    std::size_t operator()(Expression const& e) const noexcept {
+        std::size_t h = std::hash<unsigned>()(e.opcode);
+        for (auto *op : e.operands)
+            h ^= std::hash<Value*>()(op) + 0x9e3779b97f4a7c15ULL + (h<<6) + (h>>2);
+        return h;
+    }
+};
+
+struct Definition{
+  llvm::Instruction* instruction;
+  llvm::Value* variable; //where its being written
+
+  Definition(llvm::Instruction* instr, llvm::Value* var): instruction(instr), variable(var){}
+
+  bool operator<(const Definition& other) const {
+        return variable < other.variable;
+  }
+
+  bool operator==(const Definition& other) const {
+      return variable == other.variable;
+  }
+};
+
+struct DefinitionHash {
+    size_t operator()(Definition const& d) const noexcept {
+        return std::hash<void*>()(d.variable) ^
+               (std::hash<void*>()(d.instruction) << 1);
+    }
+};
+
+std::vector<llvm::Value*> getOperands(llvm::Instruction& instruction){
+  std::vector<llvm::Value*> ops;
+    for(unsigned i = 0; i < instruction.getNumOperands(); ++i) {
+        // Skip non-value operands (like block addresses, metadata)
+        llvm::Value* operand = instruction.getOperand(i);
+        if (isa<BasicBlock>(operand)) continue;
+        if (isa<MetadataAsValue>(operand)) continue;
+        if (isa<Function>(operand) && isa<CallBase>(instruction)) continue;
+
+        ops.push_back(instruction.getOperand(i));
+    }
+    return ops;
+}
 
 
   //Contains all the available expression in each basic block
 struct AvailableExpr{
-  std::unordered_map<llvm::BasicBlock*, std::unordered_set<Expression*>> IN;
-  std::unordered_map<llvm::BasicBlock*, std::unordered_set<Expression*>> OUT;
+  std::unordered_map<llvm::BasicBlock*, std::unordered_set<Expression, ExpressionHash>> IN;
+  std::unordered_map<llvm::BasicBlock*, std::unordered_set<Expression, ExpressionHash>> OUT;
 
   AvailableExpr(){}
 
   ~AvailableExpr(){}
  
-  void runAvailableExpr(Function &F, std::unordered_set<Expression*>& allExprs){     
-    std::unordered_map<llvm::BasicBlock*, std::unordered_set<Expression*>> killSets;
-    std::unordered_map<llvm::BasicBlock*, std::unordered_set<Expression*>> genSets;
+  void runAvailableExpr(Function &F, std::unordered_set<Expression, ExpressionHash>& allExprs){     
+    std::unordered_map<llvm::BasicBlock*, std::unordered_set<Expression, ExpressionHash>> killSets;
+    std::unordered_map<llvm::BasicBlock*, std::unordered_set<Expression, ExpressionHash>> genSets;
 
     //Kill sets
     //any expression in which the operands are redefined in the block
@@ -66,7 +115,7 @@ struct AvailableExpr{
 
       //resulting kill set for the block is any expression that isnt eliminated by lhs.
       for(auto expr: allExprs){
-        for(auto operand: expr->operands){
+        for(auto operand: expr.operands){
           if(lhs_vars.count(operand)){ //issue arising
             killSets[&basic_block].insert(expr);
             break;
@@ -107,8 +156,7 @@ struct AvailableExpr{
           ops.push_back(instruction.getOperand(i));
         }
         
-        Expression* expr = new Expression(instruction.getOpcode(), ops);
-        genSets[&basic_block].insert(expr);
+        genSets[&basic_block].emplace(instruction.getOpcode(), ops);
 
         
       }
@@ -133,13 +181,13 @@ struct AvailableExpr{
     while(changes){
       //compute the in and out sets of each block
       for(auto& basic_block : F){
-        std::unordered_set<Expression*> oldIN = IN[&basic_block];
-        std::unordered_set<Expression*> oldOUT = OUT[&basic_block];
+        std::unordered_set<Expression,ExpressionHash> oldIN = IN[&basic_block];
+        std::unordered_set<Expression,ExpressionHash> oldOUT = OUT[&basic_block];
 
         //IN is the intersection of all predecessors
-        std::unordered_set<Expression*> intersection = OUT[*pred_begin(&basic_block)];
+        std::unordered_set<Expression, ExpressionHash> intersection = OUT[*pred_begin(&basic_block)];
         for(auto i = pred_begin(&basic_block); i != pred_end(&basic_block); ++i){
-          for(Expression* expr : OUT[*i]){
+          for(Expression expr : OUT[*i]){
             if(OUT[*i].find(expr) == OUT[*i].end()){
               intersection.erase(expr);
             }
@@ -147,8 +195,8 @@ struct AvailableExpr{
         }
 
         //compute difference
-        std::unordered_set<Expression*> diff;
-        for(Expression* expr : IN[&basic_block]){
+        std::unordered_set<Expression, ExpressionHash> diff;
+        for(Expression expr : IN[&basic_block]){
           if(killSets[&basic_block].find(expr) == killSets[&basic_block].end()){
             diff.insert(expr);
           }
@@ -156,12 +204,12 @@ struct AvailableExpr{
 
         //compute out = gen u (in - kill)
         OUT[&basic_block] = genSets[&basic_block];
-        for(Expression* expr : diff){
+        for(Expression expr : diff){
           OUT[&basic_block].insert(expr);
         }
 
         //set changes based on if theres any differences in the sets
-        if(oldIN != IN[&basic_block] || oldOUT != OUT[&basic_block]) changes = true;
+        if(!(oldIN == IN[&basic_block] && oldOUT == OUT[&basic_block])) changes = true;
 
       }
     }
@@ -170,27 +218,20 @@ struct AvailableExpr{
   }
 };
 
-struct Definition{
-  llvm::Instruction* instruction;
-  llvm::Value* variable; //where its being written
-
-  Definition(llvm::Instruction* instr, llvm::Value* var): instruction(instr), variable(var){}
-};
-
 struct ReachingDefs{
-  std::unordered_map<llvm::BasicBlock*, std::set<Definition*>> IN;
-  std::unordered_map<llvm::BasicBlock*, std::set<Definition*>> OUT;
+  std::unordered_map<llvm::BasicBlock*, std::unordered_set<Definition, DefinitionHash>> IN;
+  std::unordered_map<llvm::BasicBlock*, std::unordered_set<Definition, DefinitionHash>> OUT;
 
 
   ReachingDefs(){}
 
   ~ReachingDefs(){}
  
-  void runReachingDefs(Function &F, std::set<Definition*> allDefs){     
+  void runReachingDefs(Function &F, std::unordered_set<Definition, DefinitionHash>& allDefs){     
     //TO DO
     //will this run into issues if two identical expressions in the same block
-    std::unordered_map<llvm::BasicBlock*, std::set<Definition*>> killSets;
-    std::unordered_map<llvm::BasicBlock*, std::set<Definition*>> genSets;
+    std::unordered_map<llvm::BasicBlock*, std::unordered_set<Definition, DefinitionHash>> killSets;
+    std::unordered_map<llvm::BasicBlock*, std::unordered_set<Definition, DefinitionHash>> genSets;
 
     //Generate GEN sets
     for(auto &basic_block : F){
@@ -202,15 +243,13 @@ struct ReachingDefs{
           auto *SI = llvm::dyn_cast<llvm::StoreInst>(&instruction);
 
           for(auto it = genSets[&basic_block].begin(); it != genSets[&basic_block].end();){
-            if ((*it)->variable == SI->getPointerOperand())
+            if ((*it).variable == SI->getPointerOperand())
                 it = genSets[&basic_block].erase(it);
             else
                 ++it;
           }
 
-
-          Definition *def = new Definition(SI, SI->getPointerOperand());
-          genSets[&basic_block].insert(def);
+          genSets[&basic_block].emplace(SI, SI->getPointerOperand());
         }
       }
     }
@@ -218,13 +257,13 @@ struct ReachingDefs{
 
     //Generate KILL sets
     for(auto &basic_block : F){
-      for(Definition* def  : genSets[&basic_block]){
-        for(Definition* otherDef : allDefs){
+      for(Definition def  : genSets[&basic_block]){
+        for(Definition otherDef : allDefs){
           if(def == otherDef) continue; //same one, skip it
           
           //two different definitions assigning to same variable, kill all others that
           //assign to the same variable
-          if(def->variable == otherDef->variable){ 
+          if(def.variable == otherDef.variable){ 
             
             killSets[&basic_block].insert(otherDef);
           }
@@ -244,19 +283,19 @@ struct ReachingDefs{
     while(change){
       //compute the in and out sets of each block
       for(auto& basic_block : F){
-        std::set<Definition*> oldIN = IN[&basic_block];
-        std::set<Definition*> oldOUT = OUT[&basic_block];
+        std::unordered_set<Definition,DefinitionHash> oldIN = IN[&basic_block];
+        std::unordered_set<Definition,DefinitionHash> oldOUT = OUT[&basic_block];
 
         //IN is the union of all predecessors
         for(auto i = pred_begin(&basic_block); i != pred_end(&basic_block); ++i){
-          for(Definition* def : OUT[*i]){
+          for(Definition def : OUT[*i]){
             IN[&basic_block].insert(def);
           }
         }
 
         //compute difference
-        std::set<Definition*> diff;
-        for(Definition* def : IN[&basic_block]){
+        std::set<Definition> diff;
+        for(Definition def : IN[&basic_block]){
           if(killSets[&basic_block].find(def) == killSets[&basic_block].end()){
             diff.insert(def);
           }
@@ -264,12 +303,12 @@ struct ReachingDefs{
 
         //compute out = gen u (in - kill)
         OUT[&basic_block] = genSets[&basic_block];
-        for(Definition* def : diff){
+        for(Definition def : diff){
           OUT[&basic_block].insert(def);
         }
 
         //set change based on if theres any differences in the sets
-        if(oldIN != IN[&basic_block] || oldOUT != OUT[&basic_block]) change = true;
+        if(!(oldIN == IN[&basic_block] && oldOUT == OUT[&basic_block])) change = true;
 
       }
     }
@@ -287,16 +326,81 @@ struct CSElimination : public FunctionPass
 
 bool runOnFunction(Function &F) override {
     // ... (Setup/Run AvailableExpr AE) ...
+
     AvailableExpr AE;
     ReachingDefs RD;
     bool changed = false;
+
+    std::unordered_set<Expression, ExpressionHash> allExprs;
+    std::unordered_set<Definition, DefinitionHash> allDefs;
+
+    //need all definitions and expressions regardless of block
+    for(auto &basic_block : F){
+      for(auto& instruction : basic_block){
+        //check if the current instruction is a definition.
+        if(instruction.getType()->isVoidTy()) continue;
+
+        allDefs.emplace(&instruction,&instruction);
+
+        allExprs.emplace(instruction.getOpcode(), getOperands(instruction));
+
+      }
+    }
+
+    //Just do this once, is ran for all blocks
+    AE.runAvailableExpr(F,allExprs);
+    RD.runReachingDefs(F,allDefs);
+
+    //forward traversal, one pass
+    for(auto& basic_block : F){
+
+      //loop through all expressions that make it to the end of the block (OUT)
+      for(auto& aExpr : AE.OUT[&basic_block]){
+
+        std::vector<Instruction*> instructionsToChange;
+
+        //in the corresponding reaching definitions of the block, find all who have the same rhs (i.e. same operands and opcode)
+        for(auto& def : RD.OUT[&basic_block]){
+          //what's a better way to do this? Will be cover all situations if we use both OUTs?
+          
+          //construct expression from rhs
+          Expression defExpr(def.instruction->getOpcode(), getOperands(*def.instruction));
+          if(defExpr != aExpr) continue;
+
+          //if rhs is equal, add to list of instructions to change later
+          instructionsToChange.push_back(def.instruction);
+        }
+
+        for(auto& instruction : instructionsToChange){
+
+          //define new T. Instructions can only belong to 1 block at a time, therefore we recreate it for each needed spot.
+          Instruction* T = BinaryOperator::Create(
+              (Instruction::BinaryOps)aExpr.opcode,
+              aExpr.operands.at(0),
+              aExpr.operands.at(1)
+          );
+
+          //insert T before each instruction
+          T->insertBefore(instruction);
+          
+          //change current instruction to simply setting it to T
+          //This is in SSA form, therefore we can replace all its uses with T directly, then delete it
+          instruction->replaceAllUsesWith(T);
+          instruction->eraseFromParent();
+        }
+
+        
+
+      }
+    }
+
+    /*
     for (auto &basic_block : F) {
         // knownExpressions map: Expression* -> Instruction*
         // This holds the Instruction that is the canonical definition for an available Expression.
         // It's crucial for CSE to know which instruction to replace the use with.
         std::unordered_map<Expression*, Instruction*> knownExpressions;
-        AE.runAvailableExpr(F,knownExpressions);
-        RD.runReachingDefs(F,knownExpressions);
+        
 
         // --- Step 1: Initialize knownExpressions from IN set (Simplification) ---
         // In a full implementation, you'd iterate through predecessors' OUT sets
@@ -304,7 +408,7 @@ bool runOnFunction(Function &F) override {
         // For this example, we'll focus on the in-block generation/killing.
 
         // Loop through all instructions in the current block
-        for (auto I = basic_block.begin(); I != basic_block.end(); /* No increment here */) {
+        for (auto I = basic_block.begin(); I != basic_block.end(); /* No increment here ) {
             Instruction *CurrentInst = &(*I);
             I++; // Increment iterator safely before potential erasure
 
@@ -363,6 +467,7 @@ bool runOnFunction(Function &F) override {
       errs() << F;
 
     return changed;
+    */
 }
 }; // end of struct CSElimination
 } // end of anonymous namespace
