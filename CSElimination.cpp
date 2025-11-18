@@ -6,6 +6,7 @@
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/IR/Value.h"        
 #include "llvm/Support/Casting.h" 
+#include <iostream>
 #include <string>
 #include <fstream>
 #include <unordered_map>
@@ -28,9 +29,42 @@ struct Expression{
   unsigned opcode;
   Expression(unsigned op, std::vector<Value*> ops): opcode(op), operands(ops) {}
 
-  bool operator==(const Expression& rhs) const {
-    return this->opcode == rhs.opcode && this->operands == rhs.operands;
+    static bool sameValue(Value* A, Value* B) {
+      // Same pointer => same
+      if (A == B) return true;
+
+      // If both are constants, compare them structurally
+      if (auto *CA = dyn_cast<Constant>(A)) {
+          if (auto *CB = dyn_cast<Constant>(B))
+              return CA->isElementWiseEqual(CB);
+      }
+
+      // If both have names (%x, %y)
+      if (A->hasName() && B->hasName())
+          return A->getName() == B->getName();
+
+      // Otherwise treat as not equal
+      return false;
   }
+
+  bool operator==(const Expression& rhs) const {
+        if (opcode != rhs.opcode){
+          errs() << "Returning false because of opcode: " << opcode << " " << rhs.opcode << "\n";
+          return false;
+        }
+        if (operands.size() != rhs.operands.size()){
+          errs() << "Returning false because of operand LENGTH: " << operands.size() << " " << rhs.operands.size() << "\n";
+          return false;
+        }
+
+        for (size_t i = 0; i < operands.size(); i++) {
+            if (!sameValue(operands[i], rhs.operands[i])){
+              errs() << "Returning false because of: " << *(operands[i]) << " " << *(rhs.operands[i]) << "\n";
+              return false;
+            }
+        }
+        return true;
+    }
 
   bool operator!=(const Expression& rhs) const {
     return !(*this == rhs);
@@ -108,8 +142,7 @@ struct AvailableExpr{
 
         //find all lhs variables that are defined
         if (!instruction.getType()->isVoidTy()){// instruction produces a value
-            auto* SI = llvm::dyn_cast<llvm::StoreInst>(&instruction);
-            lhs_vars.insert(SI->getPointerOperand());
+            lhs_vars.insert(&instruction);
         }
       }
 
@@ -143,20 +176,13 @@ struct AvailableExpr{
           }
         }
         if (!instruction.getType()->isVoidTy()){// instruction produces a value
-            //Add it
-            auto* SI = llvm::dyn_cast<llvm::StoreInst>(&instruction);
-            lhs_vars.insert(SI->getPointerOperand());
+            lhs_vars.insert(&instruction);
         }
 
         if(!canAdd) continue;
 
         //add to gen set
-        std::vector<Value*> ops;
-        for(int i = 0; i < instruction.getNumOperands(); ++i){
-          ops.push_back(instruction.getOperand(i));
-        }
-        
-        genSets[&basic_block].emplace(instruction.getOpcode(), ops);
+        genSets[&basic_block].emplace(instruction.getOpcode(), getOperands(instruction));
 
         
       }
@@ -179,17 +205,20 @@ struct AvailableExpr{
 
     bool changes = true;
     while(changes){
+      changes = false;
       //compute the in and out sets of each block
       for(auto& basic_block : F){
         std::unordered_set<Expression,ExpressionHash> oldIN = IN[&basic_block];
         std::unordered_set<Expression,ExpressionHash> oldOUT = OUT[&basic_block];
 
         //IN is the intersection of all predecessors
-        std::unordered_set<Expression, ExpressionHash> intersection = OUT[*pred_begin(&basic_block)];
-        for(auto i = pred_begin(&basic_block); i != pred_end(&basic_block); ++i){
-          for(Expression expr : OUT[*i]){
-            if(OUT[*i].find(expr) == OUT[*i].end()){
-              intersection.erase(expr);
+        if(std::distance(pred_begin(&basic_block), pred_end(&basic_block)) > 0){
+          std::unordered_set<Expression, ExpressionHash> intersection = OUT[*pred_begin(&basic_block)];
+          for(auto i = pred_begin(&basic_block); i != pred_end(&basic_block); ++i){
+            for(Expression expr : OUT[*i]){
+              if(OUT[*i].find(expr) == OUT[*i].end()){
+                intersection.erase(expr);
+              }
             }
           }
         }
@@ -237,20 +266,19 @@ struct ReachingDefs{
     for(auto &basic_block : F){
       for(auto &instruction : basic_block){
         //check if the instruction assigns a value
+        if(instruction.getType()->isVoidTy()) continue;
+
 
         //if it does, add to the gen set
-        if (instruction.getOpcode() == Instruction::Store) {
-          auto *SI = llvm::dyn_cast<llvm::StoreInst>(&instruction);
-
-          for(auto it = genSets[&basic_block].begin(); it != genSets[&basic_block].end();){
-            if ((*it).variable == SI->getPointerOperand())
-                it = genSets[&basic_block].erase(it);
-            else
-                ++it;
+        for(auto it = genSets[&basic_block].begin(); it != genSets[&basic_block].end();){
+          if ((*it).variable == dyn_cast<Value>(&instruction)){
+              it = genSets[&basic_block].erase(it);
+          }else{
+              ++it;
           }
-
-          genSets[&basic_block].emplace(SI, SI->getPointerOperand());
         }
+
+        genSets[&basic_block].emplace(&instruction, &instruction);
       }
     }
 
@@ -327,6 +355,8 @@ struct CSElimination : public FunctionPass
 bool runOnFunction(Function &F) override {
     // ... (Setup/Run AvailableExpr AE) ...
 
+    std::cout << "Process started!" << std::endl;
+
     AvailableExpr AE;
     ReachingDefs RD;
     bool changed = false;
@@ -349,7 +379,10 @@ bool runOnFunction(Function &F) override {
 
     //Just do this once, is ran for all blocks
     AE.runAvailableExpr(F,allExprs);
+    std::cout << "Available Expressions has run!" << std::endl;
+
     RD.runReachingDefs(F,allDefs);
+    std::cout << "Reaching Definitions has run!" << std::endl;
 
     //forward traversal, one pass
     for(auto& basic_block : F){
@@ -359,13 +392,23 @@ bool runOnFunction(Function &F) override {
 
         std::vector<Instruction*> instructionsToChange;
 
+        std::cout << "Iterate ae" << std::endl;
+
         //in the corresponding reaching definitions of the block, find all who have the same rhs (i.e. same operands and opcode)
         for(auto& def : RD.OUT[&basic_block]){
           //what's a better way to do this? Will be cover all situations if we use both OUTs?
+
+          //Make sure OUT actually has something
+          errs() << *(def.instruction) << "\n";
           
           //construct expression from rhs
           Expression defExpr(def.instruction->getOpcode(), getOperands(*def.instruction));
-          if(defExpr != aExpr) continue;
+          
+          if(!(defExpr == aExpr)) continue;
+
+          if (defExpr.opcode == Instruction::Alloca) continue;   // skip allocas. They only define a register.
+
+          std::cout << "Found instruction to change!" << std::endl;
 
           //if rhs is equal, add to list of instructions to change later
           instructionsToChange.push_back(def.instruction);
@@ -373,6 +416,7 @@ bool runOnFunction(Function &F) override {
 
         for(auto& instruction : instructionsToChange){
 
+          if(!Instruction::isBinaryOp(aExpr.opcode)) continue;
           //define new T. Instructions can only belong to 1 block at a time, therefore we recreate it for each needed spot.
           Instruction* T = BinaryOperator::Create(
               (Instruction::BinaryOps)aExpr.opcode,
@@ -388,86 +432,10 @@ bool runOnFunction(Function &F) override {
           instruction->replaceAllUsesWith(T);
           instruction->eraseFromParent();
         }
-
-        
-
       }
     }
 
-    /*
-    for (auto &basic_block : F) {
-        // knownExpressions map: Expression* -> Instruction*
-        // This holds the Instruction that is the canonical definition for an available Expression.
-        // It's crucial for CSE to know which instruction to replace the use with.
-        std::unordered_map<Expression*, Instruction*> knownExpressions;
-        
-
-        // --- Step 1: Initialize knownExpressions from IN set (Simplification) ---
-        // In a full implementation, you'd iterate through predecessors' OUT sets
-        // to find the *actual* instruction that computed each available expression.
-        // For this example, we'll focus on the in-block generation/killing.
-
-        // Loop through all instructions in the current block
-        for (auto I = basic_block.begin(); I != basic_block.end(); /* No increment here ) {
-            Instruction *CurrentInst = &(*I);
-            I++; // Increment iterator safely before potential erasure
-
-            // Skip non-value instructions (Stores, Branches, etc.)
-            if (CurrentInst->getType()->isVoidTy() || CurrentInst->isTerminator()) {
-                // If it's a store, you'd perform the Kill operation here.
-                continue;
-            }
-
-            // --- Step 2: Create the Expression for the current Instruction ---
-            std::vector<Value*> ops;
-            for(unsigned i = 0; i < CurrentInst->getNumOperands(); ++i) {
-                // Skip non-value operands (like block addresses, metadata)
-                if (isa<BasicBlock>(CurrentInst->getOperand(i))) continue;
-                ops.push_back(CurrentInst->getOperand(i));
-            }
-
-            // Use a unique pointer for the temporary expression object for lookup
-            Expression TempExpr(CurrentInst->getOpcode(), ops);
-
-            Instruction *PrevInst = nullptr;
-            
-            // --- Step 3: Look Up (Substitution) ---
-            // Search through the currently known expressions to see if TempExpr is available
-            for (auto const& [expr_ptr, inst_ptr] : knownExpressions) {
-                if (*expr_ptr == TempExpr) {
-                    PrevInst = inst_ptr;
-                    break;
-                }
-            }
-
-            if (PrevInst) {
-                // Redundant computation found! Perform the substitution.
-                CurrentInst->replaceAllUsesWith(PrevInst);
-                CurrentInst->eraseFromParent();
-                changed = true;
-                continue; // Move to the next instruction
-            }
-
-            // --- Step 4: Generation ---
-            // The instruction is not redundant. It is now the *canonical definition*
-            // for this expression within the block. We must add it to the known set.
-            
-            // IMPORTANT: You need to ensure the Expression* added to the map is unique and persistent.
-            // Since you were collecting allExprs globally, you should reuse an existing one or
-            // create a new one and add it to allExprs.
-            
-            // For a complete solution, you'd need a way to look up the persistent Expression*
-            // from the global allExprs set using TempExpr.
-            
-            // For a simpler, in-block only demonstration:
-            Expression* NewExpr = new Expression(CurrentInst->getOpcode(), ops);
-            knownExpressions[NewExpr] = CurrentInst;
-        }
-      }
-      errs() << F;
-
-    return changed;
-    */
+    
 }
 }; // end of struct CSElimination
 } // end of anonymous namespace
