@@ -26,8 +26,9 @@ namespace
   
 struct Expression{
   std::vector<Value*> operands;
+  Instruction* instruction;
   unsigned opcode;
-  Expression(unsigned op, std::vector<Value*> ops): opcode(op), operands(ops) {}
+  Expression(Instruction* instr_,unsigned op, std::vector<Value*> ops):instruction(instr_), opcode(op), operands(ops) {}
 
     static bool sameValue(Value* A, Value* B) {
       // Same pointer => same
@@ -102,6 +103,15 @@ struct DefinitionHash {
     }
 };
 
+struct ReplacementTask {
+  std::vector<Instruction*> redundants;    // all others that compute B op C
+  Expression expr;
+
+  ReplacementTask(std::vector<Instruction*>& redun_, Expression expr_):
+  redundants(redun_),
+  expr(expr_){}
+};
+
 std::vector<llvm::Value*> getOperands(llvm::Instruction& instruction){
   std::vector<llvm::Value*> ops;
     for(unsigned i = 0; i < instruction.getNumOperands(); ++i) {
@@ -114,6 +124,24 @@ std::vector<llvm::Value*> getOperands(llvm::Instruction& instruction){
         ops.push_back(instruction.getOperand(i));
     }
     return ops;
+}
+
+bool isPureIntegerOp(Instruction *I) {
+    switch (I->getOpcode()) {
+        case Instruction::Add:
+        case Instruction::Sub:
+        case Instruction::Mul:
+        case Instruction::And:
+        case Instruction::Or:
+        case Instruction::Xor:
+        case Instruction::Shl:
+        case Instruction::LShr:
+        case Instruction::AShr:
+            return I->getOperand(0)->getType()->isIntegerTy() &&
+                   I->getOperand(1)->getType()->isIntegerTy();
+        default:
+            return false;
+    }
 }
 
 
@@ -182,7 +210,7 @@ struct AvailableExpr{
         if(!canAdd) continue;
 
         //add to gen set
-        genSets[&basic_block].emplace(instruction.getOpcode(), getOperands(instruction));
+        genSets[&basic_block].emplace(&instruction,instruction.getOpcode(), getOperands(instruction));
 
         
       }
@@ -372,7 +400,7 @@ bool runOnFunction(Function &F) override {
 
         allDefs.emplace(&instruction,&instruction);
 
-        allExprs.emplace(instruction.getOpcode(), getOperands(instruction));
+        allExprs.emplace(&instruction,instruction.getOpcode(), getOperands(instruction));
 
       }
     }
@@ -384,12 +412,15 @@ bool runOnFunction(Function &F) override {
     RD.runReachingDefs(F,allDefs);
     std::cout << "Reaching Definitions has run!" << std::endl;
 
+    std::vector<ReplacementTask> tasks;
+
     //forward traversal, one pass
     for(auto& basic_block : F){
 
       //loop through all expressions that make it to the end of the block (OUT)
-      for(auto& aExpr : AE.OUT[&basic_block]){
-
+      for(auto& aExpr : AE.IN[&basic_block]){
+        
+        //reaching definition instructions to change
         std::vector<Instruction*> instructionsToChange;
 
         std::cout << "Iterate ae" << std::endl;
@@ -397,16 +428,18 @@ bool runOnFunction(Function &F) override {
         //in the corresponding reaching definitions of the block, find all who have the same rhs (i.e. same operands and opcode)
         for(auto& def : RD.OUT[&basic_block]){
           //what's a better way to do this? Will be cover all situations if we use both OUTs?
-
+          if(def.instruction == nullptr){
+            errs() << "NULL INSTRUCTION \n";
+            continue;
+          }
           //Make sure OUT actually has something
           errs() << *(def.instruction) << "\n";
           
           //construct expression from rhs
-          Expression defExpr(def.instruction->getOpcode(), getOperands(*def.instruction));
+          Expression defExpr(def.instruction, def.instruction->getOpcode(), getOperands(*def.instruction));
           
           if(!(defExpr == aExpr)) continue;
-
-          if (defExpr.opcode == Instruction::Alloca) continue;   // skip allocas. They only define a register.
+          if (!isPureIntegerOp(def.instruction)) continue;   // only include pure integer operations
 
           std::cout << "Found instruction to change!" << std::endl;
 
@@ -414,27 +447,38 @@ bool runOnFunction(Function &F) override {
           instructionsToChange.push_back(def.instruction);
         }
 
-        for(auto& instruction : instructionsToChange){
-
-          if(!Instruction::isBinaryOp(aExpr.opcode)) continue;
-          //define new T. Instructions can only belong to 1 block at a time, therefore we recreate it for each needed spot.
-          Instruction* T = BinaryOperator::Create(
-              (Instruction::BinaryOps)aExpr.opcode,
-              aExpr.operands.at(0),
-              aExpr.operands.at(1)
-          );
-
-          //insert T before each instruction
-          T->insertBefore(instruction);
-          
-          //change current instruction to simply setting it to T
-          //This is in SSA form, therefore we can replace all its uses with T directly, then delete it
-          instruction->replaceAllUsesWith(T);
-          instruction->eraseFromParent();
+        if (!instructionsToChange.empty()){
+          tasks.push_back(ReplacementTask(instructionsToChange,aExpr));
         }
       }
     }
 
+    std::vector<Instruction*> deleteList;
+
+    for (auto &task : tasks) {
+
+      Instruction *rep = task.expr.instruction;
+
+      errs() << "Replacing instruction! \n";
+      // Create the new T
+      Instruction *T = BinaryOperator::Create(
+          (Instruction::BinaryOps)task.expr.opcode,
+          task.expr.operands[0],
+          task.expr.operands[1]
+      );
+      T->setName("tmp");
+
+      T->insertBefore(rep);
+
+      // Replace all redundant expressions with T
+      for (Instruction *I : task.redundants) {
+          I->replaceAllUsesWith(T);
+          deleteList.push_back(I);
+      }
+    }
+
+    for (Instruction *I : deleteList)
+        I->eraseFromParent();
     
 }
 }; // end of struct CSElimination
