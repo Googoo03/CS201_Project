@@ -160,7 +160,10 @@ struct AvailableExpr{
 
     //Kill sets
     //any expression in which the operands are redefined in the block
-    for(auto &basic_block : F){
+    for (auto &basic_block : F) {
+        killSets[&basic_block] = {};
+    }
+    /*for(auto &basic_block : F){
 
       //set of lhs vars
       std::set<llvm::Value*> lhs_vars;
@@ -183,7 +186,7 @@ struct AvailableExpr{
           }
         }
       }
-    }
+    }*/
 
     //Gen sets
     //any expression used in block where operands are not redefined
@@ -241,14 +244,20 @@ struct AvailableExpr{
 
         //IN is the intersection of all predecessors
         if(std::distance(pred_begin(&basic_block), pred_end(&basic_block)) > 0){
+          
           std::unordered_set<Expression, ExpressionHash> intersection = OUT[*pred_begin(&basic_block)];
+
           for(auto i = pred_begin(&basic_block); i != pred_end(&basic_block); ++i){
-            for(Expression expr : OUT[*i]){
-              if(OUT[*i].find(expr) == OUT[*i].end()){
-                intersection.erase(expr);
-              }
+            for (auto it = intersection.begin(); it != intersection.end(); ) {
+                if (!OUT[*i].count(*it)) {
+                    it = intersection.erase(it);   // remove expressions not in this pred
+                } else {
+                    ++it;
+                }
             }
           }
+
+          IN[&basic_block] = std::move(intersection);
         }
 
         //compute difference
@@ -264,6 +273,8 @@ struct AvailableExpr{
         for(Expression expr : diff){
           OUT[&basic_block].insert(expr);
         }
+
+        
 
         //set changes based on if theres any differences in the sets
         if(!(oldIN == IN[&basic_block] && oldOUT == OUT[&basic_block])) changes = true;
@@ -312,6 +323,10 @@ struct ReachingDefs{
 
 
     //Generate KILL sets
+    for(auto& basic_block : F){
+      killSets[&basic_block] = {};
+    }
+    /*
     for(auto &basic_block : F){
       for(Definition def  : genSets[&basic_block]){
         for(Definition otherDef : allDefs){
@@ -325,32 +340,36 @@ struct ReachingDefs{
           }
         }
       }
-    }
+    }*/
 
     //Actual reaching definition pass here
 
     //initialize the in out sets
     for(auto& basic_block : F){
-      OUT[&basic_block] = genSets[&basic_block]; 
+      OUT[&basic_block] = {};
+      IN[&basic_block] = {};
     }
 
-    bool change = false;
+    bool change = true;
 
     while(change){
+      change = false;
       //compute the in and out sets of each block
       for(auto& basic_block : F){
         std::unordered_set<Definition,DefinitionHash> oldIN = IN[&basic_block];
         std::unordered_set<Definition,DefinitionHash> oldOUT = OUT[&basic_block];
 
         //IN is the union of all predecessors
+        std::unordered_set<Definition,DefinitionHash> newIN;
         for(auto i = pred_begin(&basic_block); i != pred_end(&basic_block); ++i){
           for(Definition def : OUT[*i]){
-            IN[&basic_block].insert(def);
+            newIN.insert(def);
           }
         }
+        IN[&basic_block] = std::move(newIN);
 
         //compute difference
-        std::set<Definition> diff;
+        std::unordered_set<Definition, DefinitionHash> diff;
         for(Definition def : IN[&basic_block]){
           if(killSets[&basic_block].find(def) == killSets[&basic_block].end()){
             diff.insert(def);
@@ -408,10 +427,21 @@ bool runOnFunction(Function &F) override {
     //Just do this once, is ran for all blocks
     AE.runAvailableExpr(F,allExprs);
     std::cout << "Available Expressions has run!" << std::endl;
+    for(auto& basic_block : F){
+      for(auto& aExpr : AE.IN[&basic_block]){
+        errs() << *(aExpr.instruction) << "\n";
+      }
+      }
 
     RD.runReachingDefs(F,allDefs);
     std::cout << "Reaching Definitions has run!" << std::endl;
-
+    for(auto& basic_block : F){
+      for(auto& def : RD.OUT[&basic_block]){
+        errs() << *(def.instruction) << "\n";
+      }
+      errs() << "b--------\n";
+    }
+    errs() << "---------------------\n"; 
     std::vector<ReplacementTask> tasks;
 
     //forward traversal, one pass
@@ -426,7 +456,7 @@ bool runOnFunction(Function &F) override {
         std::cout << "Iterate ae" << std::endl;
 
         //in the corresponding reaching definitions of the block, find all who have the same rhs (i.e. same operands and opcode)
-        for(auto& def : RD.OUT[&basic_block]){
+        for(auto& def : RD.IN[&basic_block]){
           //what's a better way to do this? Will be cover all situations if we use both OUTs?
           if(def.instruction == nullptr){
             errs() << "NULL INSTRUCTION \n";
@@ -478,7 +508,7 @@ bool runOnFunction(Function &F) override {
     }
 
     for (Instruction *I : deleteList)
-        I->eraseFromParent();
+        if (I->use_empty()) I->eraseFromParent();
     
 }
 }; // end of struct CSElimination
