@@ -4,6 +4,7 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Instruction.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Value.h"        
 #include "llvm/Support/Casting.h" 
 #include <iostream>
@@ -70,6 +71,14 @@ struct Expression{
   bool operator!=(const Expression& rhs) const {
     return !(*this == rhs);
   }
+
+  bool usesOperand(Value* V) const {
+    for (auto *op : operands) {
+        if (op == V)
+            return true;
+    }
+    return false;
+  }
 };
 
 struct ExpressionHash {
@@ -121,7 +130,13 @@ std::vector<llvm::Value*> getOperands(llvm::Instruction& instruction){
         if (isa<MetadataAsValue>(operand)) continue;
         if (isa<Function>(operand) && isa<CallBase>(instruction)) continue;
 
-        ops.push_back(instruction.getOperand(i));
+        LoadInst* load = dyn_cast<LoadInst>((&instruction)->getOperand(i));
+        if(load){
+          ops.push_back(load->getPointerOperand());
+        }else{
+          ops.push_back((&instruction)->getOperand(i));          
+        }
+        
     }
     return ops;
 }
@@ -137,8 +152,7 @@ bool isPureIntegerOp(Instruction *I) {
         case Instruction::Shl:
         case Instruction::LShr:
         case Instruction::AShr:
-            return I->getOperand(0)->getType()->isIntegerTy() &&
-                   I->getOperand(1)->getType()->isIntegerTy();
+            return true;
         default:
             return false;
     }
@@ -150,73 +164,39 @@ struct AvailableExpr{
   std::unordered_map<llvm::BasicBlock*, std::unordered_set<Expression, ExpressionHash>> IN;
   std::unordered_map<llvm::BasicBlock*, std::unordered_set<Expression, ExpressionHash>> OUT;
 
+  std::unordered_map<llvm::BasicBlock*, std::unordered_set<Expression, ExpressionHash>> killSets;
+  std::unordered_map<llvm::BasicBlock*, std::unordered_set<Expression, ExpressionHash>> genSets;
+
   AvailableExpr(){}
 
   ~AvailableExpr(){}
  
   void runAvailableExpr(Function &F, std::unordered_set<Expression, ExpressionHash>& allExprs){     
-    std::unordered_map<llvm::BasicBlock*, std::unordered_set<Expression, ExpressionHash>> killSets;
-    std::unordered_map<llvm::BasicBlock*, std::unordered_set<Expression, ExpressionHash>> genSets;
+
 
     //Kill sets
     //any expression in which the operands are redefined in the block
     for (auto &basic_block : F) {
         killSets[&basic_block] = {};
     }
-    /*for(auto &basic_block : F){
-
-      //set of lhs vars
-      std::set<llvm::Value*> lhs_vars;
-
-      for(auto &instruction : basic_block){
-        //find all rhs expressions
-
-        //find all lhs variables that are defined
-        if (!instruction.getType()->isVoidTy()){// instruction produces a value
-            lhs_vars.insert(&instruction);
-        }
-      }
-
-      //resulting kill set for the block is any expression that isnt eliminated by lhs.
-      for(auto expr: allExprs){
-        for(auto operand: expr.operands){
-          if(lhs_vars.count(operand)){ //issue arising
-            killSets[&basic_block].insert(expr);
-            break;
-          }
-        }
-      }
-    }*/
+    
 
     //Gen sets
     //any expression used in block where operands are not redefined
-    for(auto &basic_block : F){
-      
-      //set of lhs vars thus 
-      std::set<llvm::Value*> lhs_vars;
-      
-      for(auto &instruction : basic_block){
+    for (auto &basic_block : F) {
 
-        int canAdd = true;
-        for(int i = 0; i < instruction.getNumOperands(); ++i){
-          Value* op = instruction.getOperand(i);
-          //no longer safe to add this to gen
-          if(lhs_vars.count(op)){
-            canAdd = false;
-            break;
-          }
+        for (auto &inst : basic_block) {
+            
+            // Must produce a value
+            if (inst.getType()->isVoidTy())
+                continue;
+
+            // Must be a pure, side-effect-free expression
+            if (!isPureIntegerOp(&inst))
+                continue;
+
+            genSets[&basic_block].emplace(&inst,inst.getOpcode(), getOperands(inst));
         }
-        if (!instruction.getType()->isVoidTy()){// instruction produces a value
-            lhs_vars.insert(&instruction);
-        }
-
-        if(!canAdd) continue;
-
-        //add to gen set
-        genSets[&basic_block].emplace(&instruction,instruction.getOpcode(), getOperands(instruction));
-
-        
-      }
     }
     
     //go through all the blocks
@@ -233,6 +213,19 @@ struct AvailableExpr{
       //otherwise, set to all expr
       IN[&basic_block] = allExprs;
     }
+
+
+    std::cout << "Available Expressions GEN SETS!" << std::endl;
+    for(auto& basic_block : F){
+      for(auto& aExpr : genSets[&basic_block]){
+        errs() << *(aExpr.instruction) << " | "<< *(aExpr.operands.at(0)) << " " << *(aExpr.operands.at(1)) << "\n";
+      }
+      errs() << "b--------\n";
+    }
+
+
+
+
 
     bool changes = true;
     while(changes){
@@ -258,6 +251,18 @@ struct AvailableExpr{
           }
 
           IN[&basic_block] = std::move(intersection);
+          std::cout << "Available Expressions COMPUTED INS!" << std::endl;
+          for(auto& basic_block : F){
+            for(auto& aExpr : IN[&basic_block]){
+              errs() << *(aExpr.instruction) << " | ";
+              for(auto& op : aExpr.operands){
+                errs() << *(op) << " ";
+              }
+              errs() << "\n";
+              
+            }
+            errs() << "b--------\n";
+          }
         }
 
         //compute difference
@@ -277,7 +282,10 @@ struct AvailableExpr{
         
 
         //set changes based on if theres any differences in the sets
-        if(!(oldIN == IN[&basic_block] && oldOUT == OUT[&basic_block])) changes = true;
+        if(oldIN != IN[&basic_block] || oldOUT != OUT[&basic_block]){
+          errs() << "AE CHANGED **************************\n"; 
+          changes = true;
+        }
 
       }
     }
@@ -304,20 +312,11 @@ struct ReachingDefs{
     //Generate GEN sets
     for(auto &basic_block : F){
       for(auto &instruction : basic_block){
-        //check if the instruction assigns a value
-        if(instruction.getType()->isVoidTy()) continue;
+          // skip instructions that do not define a value
+          if(instruction.getType()->isVoidTy()) continue;
 
-
-        //if it does, add to the gen set
-        for(auto it = genSets[&basic_block].begin(); it != genSets[&basic_block].end();){
-          if ((*it).variable == dyn_cast<Value>(&instruction)){
-              it = genSets[&basic_block].erase(it);
-          }else{
-              ++it;
-          }
-        }
-
-        genSets[&basic_block].emplace(&instruction, &instruction);
+          // add instruction to GEN set
+          genSets[&basic_block].emplace(&instruction, &instruction);
       }
     }
 
@@ -326,21 +325,6 @@ struct ReachingDefs{
     for(auto& basic_block : F){
       killSets[&basic_block] = {};
     }
-    /*
-    for(auto &basic_block : F){
-      for(Definition def  : genSets[&basic_block]){
-        for(Definition otherDef : allDefs){
-          if(def == otherDef) continue; //same one, skip it
-          
-          //two different definitions assigning to same variable, kill all others that
-          //assign to the same variable
-          if(def.variable == otherDef.variable){ 
-            
-            killSets[&basic_block].insert(otherDef);
-          }
-        }
-      }
-    }*/
 
     //Actual reaching definition pass here
 
@@ -360,13 +344,12 @@ struct ReachingDefs{
         std::unordered_set<Definition,DefinitionHash> oldOUT = OUT[&basic_block];
 
         //IN is the union of all predecessors
-        std::unordered_set<Definition,DefinitionHash> newIN;
+        IN[&basic_block].clear();
         for(auto i = pred_begin(&basic_block); i != pred_end(&basic_block); ++i){
           for(Definition def : OUT[*i]){
-            newIN.insert(def);
+            IN[&basic_block].insert(def);
           }
         }
-        IN[&basic_block] = std::move(newIN);
 
         //compute difference
         std::unordered_set<Definition, DefinitionHash> diff;
@@ -383,7 +366,7 @@ struct ReachingDefs{
         }
 
         //set change based on if theres any differences in the sets
-        if(!(oldIN == IN[&basic_block] && oldOUT == OUT[&basic_block])) change = true;
+        if(oldIN != IN[&basic_block] || oldOUT != OUT[&basic_block]) change = true;
 
       }
     }
@@ -431,12 +414,13 @@ bool runOnFunction(Function &F) override {
       for(auto& aExpr : AE.IN[&basic_block]){
         errs() << *(aExpr.instruction) << "\n";
       }
-      }
+      errs() << "b--------\n";
+    }
 
     RD.runReachingDefs(F,allDefs);
     std::cout << "Reaching Definitions has run!" << std::endl;
     for(auto& basic_block : F){
-      for(auto& def : RD.OUT[&basic_block]){
+      for(auto& def : RD.IN[&basic_block]){
         errs() << *(def.instruction) << "\n";
       }
       errs() << "b--------\n";
@@ -447,23 +431,15 @@ bool runOnFunction(Function &F) override {
     //forward traversal, one pass
     for(auto& basic_block : F){
 
-      //loop through all expressions that make it to the end of the block (OUT)
-      for(auto& aExpr : AE.IN[&basic_block]){
+      //if OUT = GEN u IN, then...
+
+      for(auto& aExpr : AE.OUT[&basic_block]){
         
         //reaching definition instructions to change
         std::vector<Instruction*> instructionsToChange;
 
-        std::cout << "Iterate ae" << std::endl;
-
         //in the corresponding reaching definitions of the block, find all who have the same rhs (i.e. same operands and opcode)
-        for(auto& def : RD.IN[&basic_block]){
-          //what's a better way to do this? Will be cover all situations if we use both OUTs?
-          if(def.instruction == nullptr){
-            errs() << "NULL INSTRUCTION \n";
-            continue;
-          }
-          //Make sure OUT actually has something
-          errs() << *(def.instruction) << "\n";
+        for(auto& def : RD.OUT[&basic_block]){
           
           //construct expression from rhs
           Expression defExpr(def.instruction, def.instruction->getOpcode(), getOperands(*def.instruction));
@@ -485,16 +461,27 @@ bool runOnFunction(Function &F) override {
 
     std::vector<Instruction*> deleteList;
 
+    if(tasks.size() > 0) {
+      llvm::IRBuilder<> entryBuilder(&F.getEntryBlock(), F.getEntryBlock().begin());
+      llvm::AllocaInst* tmpPtr = entryBuilder.CreateAlloca(
+          llvm::Type::getInt32Ty(F.getContext()), // type: i32
+          nullptr,                                // optional array size
+          "tmp"                                    // name
+      );
+    }
+
     for (auto &task : tasks) {
 
       Instruction *rep = task.expr.instruction;
 
-      errs() << "Replacing instruction! \n";
+      errs() << "Replacing instruction! " << *(task.expr.instruction)<<" \n";
       // Create the new T
+
+      //dont compare operands stored, instead, rederive them!!!
       Instruction *T = BinaryOperator::Create(
           (Instruction::BinaryOps)task.expr.opcode,
-          task.expr.operands[0],
-          task.expr.operands[1]
+          task.expr.instruction->getOperand(0),
+          task.expr.instruction->getOperand(1)
       );
       T->setName("tmp");
 
@@ -507,8 +494,14 @@ bool runOnFunction(Function &F) override {
       }
     }
 
-    for (Instruction *I : deleteList)
-        if (I->use_empty()) I->eraseFromParent();
+    for(auto it = deleteList.begin(); it != deleteList.end(); ){
+
+      if((*it)->use_empty() && (*it)->getParent()){
+          if(*it) (*it)->eraseFromParent();
+      } else {
+          ++it;
+      }
+    }
     
 }
 }; // end of struct CSElimination
