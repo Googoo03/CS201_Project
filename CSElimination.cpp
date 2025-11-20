@@ -479,31 +479,40 @@ bool runOnFunction(Function &F) override {
 
     for (auto &task : tasks) {
 
-      Instruction *rep = task.expr.instruction;
+      Instruction *rep = task.expr.instruction; //original to consider
+
+      
 
       errs() << "Replacing instruction! " << *(task.expr.instruction)<<" \n";
       // Create the new T
 
-      IRBuilder<> storeBuilder(rep->getNextNode());
-      StoreInst* ST = storeBuilder.CreateStore(rep, tmpPtr);
+      for(auto& instruction : task.redundants){
+        IRBuilder<> storeBuilder(instruction->getNextNode());
+        StoreInst* ST = storeBuilder.CreateStore(instruction, tmpPtr);
 
-      //Load stored value
-      IRBuilder<> builder(ST->getNextNode());
-      LoadInst *L = builder.CreateLoad(
-        Type::getInt32Ty(F.getContext()),
-        tmpPtr
-      );
+        //Load stored value
+        IRBuilder<> builder(ST->getNextNode());
+        LoadInst *L = builder.CreateLoad(
+          Type::getInt32Ty(F.getContext()),
+          tmpPtr
+        );
 
+        instruction->replaceAllUsesWith(L);
+        ST->setOperand(0, instruction);
+      }
+
+      //load
+      IRBuilder<> builder(rep->getNextNode());
+        LoadInst *L = builder.CreateLoad(
+          Type::getInt32Ty(F.getContext()),
+          tmpPtr
+        );
+
+      //replace rep isntances
       rep->replaceAllUsesWith(L);
-      ST->setOperand(0, rep);
 
-
-      // Replace all redundant expressions with T
-      /*
-      for (Instruction *I : task.redundants) {
-          I->replaceAllUsesWith(T);
-          deleteList.push_back(I);
-      }*/
+      //delete rep
+      rep->eraseFromParent();
     }
 
     for(auto it = deleteList.begin(); it != deleteList.end(); ){
