@@ -426,6 +426,8 @@ bool runOnFunction(Function &F) override {
       errs() << "b--------\n";
     }
     errs() << "---------------------\n"; 
+    errs() << "Data Flow Analysis Complete\n"; 
+    errs() << "---------------------\n"; 
     std::vector<ReplacementTask> tasks;
 
     //forward traversal, one pass
@@ -448,7 +450,7 @@ bool runOnFunction(Function &F) override {
           if (!isPureIntegerOp(def.instruction)) continue;   // only include pure integer operations
 
           std::cout << "Found instruction to change!" << std::endl;
-
+          changed = true;
           //if rhs is equal, add to list of instructions to change later
           instructionsToChange.push_back(def.instruction);
         }
@@ -459,6 +461,10 @@ bool runOnFunction(Function &F) override {
       }
     }
 
+    errs() << "---------------------\n"; 
+    errs() << "Finding Common Subexpressions Complete\n"; 
+    errs() << "---------------------\n"; 
+    
     std::vector<Instruction*> deleteList;
 
     if(tasks.size() > 0) {
@@ -502,6 +508,8 @@ bool runOnFunction(Function &F) override {
           ++it;
       }
     }
+    errs()<<F;
+    return changed;
     
 }
 }; // end of struct CSElimination
