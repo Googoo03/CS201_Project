@@ -183,7 +183,15 @@ struct AvailableExpr{
               Value *storedPtr = SI->getPointerOperand();
 
               for (auto &expr : allExprs) {
-                  if (!isa<LoadInst>(expr.instruction))
+                  bool containsLoad = false;
+                  if(isa<LoadInst>(expr.instruction)) containsLoad = true;
+
+                  for(int i = 0; i < expr.instruction->getNumOperands(); ++i){
+                    LoadInst* load = dyn_cast<LoadInst>((expr.instruction)->getOperand(i));
+                    if(load) containsLoad = true;
+                  }
+
+                  if (!containsLoad)
                       continue;
 
                   for(auto& op : expr.operands){
@@ -199,7 +207,7 @@ struct AvailableExpr{
         }
     }
 
-    std::cout << "Available Expressions KILL SETS!" << std::endl;
+    /*std::cout << "Available Expressions KILL SETS!" << std::endl;
     for(auto& basic_block : F){
       for(auto& aExpr : killSets[&basic_block]){
         errs() << *(aExpr.instruction) << " | ";
@@ -210,7 +218,7 @@ struct AvailableExpr{
         
       }
       errs() << "b--------\n";
-    }
+    }*/
     
 
     //Gen sets
@@ -381,15 +389,28 @@ struct ReachingDefs{
 
                   if (auto *PrevStore = dyn_cast<StoreInst>(def.instruction)) {
                     if (PrevStore == SI) continue;
-                    const Value *previousDef = PrevStore->getPointerOperand();
+                    Value *previousDef = PrevStore->getPointerOperand();
 
-                    if (previousDef == storedPtr) {
-                        killSets[&basic_block].emplace(&instruction,&instruction);
+                    if (Expression::sameValue(previousDef, storedPtr)) {
+                        killSets[&basic_block].emplace(PrevStore,PrevStore);
                     }
                 }
               }
+
+
           }
         }
+    }
+
+    std::cout << "Reaching Definitions KILL SETS!" << std::endl;
+    for(auto& basic_block : F){
+      for(auto& aExpr : killSets[&basic_block]){
+        errs() << *(aExpr.instruction) << " | ";
+        
+        errs() << "\n";
+        
+      }
+      errs() << "b--------\n";
     }
 
     //Actual reaching definition pass here
@@ -464,11 +485,14 @@ bool runOnFunction(Function &F) override {
     for(auto &basic_block : F){
       for(auto& instruction : basic_block){
         //check if the current instruction is a definition.
-        if(instruction.getType()->isVoidTy()) continue;
 
-        allDefs.emplace(&instruction,&instruction);
-
-        allExprs.emplace(&instruction,instruction.getOpcode(), getOperands(instruction));
+        if(!instruction.getType()->isVoidTy() || isa<StoreInst>(instruction)){
+            allDefs.emplace(&instruction,&instruction);
+        }
+        
+        if(!instruction.getType()->isVoidTy()){
+            allExprs.emplace(&instruction,instruction.getOpcode(), getOperands(instruction));
+        }
 
       }
     }
@@ -522,7 +546,7 @@ bool runOnFunction(Function &F) override {
           instructionsToChange.push_back(def.instruction);
         }
 
-        if (!instructionsToChange.empty()){
+        if (instructionsToChange.size() > 1){
           tasks.push_back(ReplacementTask(instructionsToChange,aExpr));
         }
       }
