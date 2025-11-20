@@ -51,7 +51,7 @@ struct Expression{
 
   bool operator==(const Expression& rhs) const {
         if (opcode != rhs.opcode){
-          errs() << "Returning false because of opcode: " << opcode << " " << rhs.opcode << "\n";
+          //errs() << "Returning false because of opcode: " << opcode << " " << rhs.opcode << "\n";
           return false;
         }
         if (operands.size() != rhs.operands.size()){
@@ -142,6 +142,7 @@ std::vector<llvm::Value*> getOperands(llvm::Instruction& instruction){
 }
 
 bool isPureIntegerOp(Instruction *I) {
+    
     switch (I->getOpcode()) {
         case Instruction::Add:
         case Instruction::Sub:
@@ -177,7 +178,38 @@ struct AvailableExpr{
     //Kill sets
     //any expression in which the operands are redefined in the block
     for (auto &basic_block : F) {
-        killSets[&basic_block] = {};
+        for(auto& instruction : basic_block){
+          if (auto *SI = dyn_cast<StoreInst>(&instruction)) {
+              Value *storedPtr = SI->getPointerOperand();
+
+              for (auto &expr : allExprs) {
+                  if (!isa<LoadInst>(expr.instruction))
+                      continue;
+
+                  for(auto& op : expr.operands){
+                    if(Expression::sameValue(op,storedPtr)){
+                      killSets[&basic_block].insert(expr);
+                      break;
+                    }
+                  }
+
+
+              }
+          }
+        }
+    }
+
+    std::cout << "Available Expressions KILL SETS!" << std::endl;
+    for(auto& basic_block : F){
+      for(auto& aExpr : killSets[&basic_block]){
+        errs() << *(aExpr.instruction) << " | ";
+        for(auto& op: aExpr.operands){
+          errs() << *(op) << " ";
+        }
+        errs() << "\n";
+        
+      }
+      errs() << "b--------\n";
     }
     
 
@@ -194,6 +226,11 @@ struct AvailableExpr{
             // Must be a pure, side-effect-free expression
             if (!isPureIntegerOp(&inst))
                 continue;
+
+            if((&inst)->getOpcode() == Instruction::Load){
+                auto *LI = dyn_cast<LoadInst>(&inst);
+                if (!(LI->isVolatile() || LI->isAtomic())) continue;
+            }
 
             genSets[&basic_block].emplace(&inst,inst.getOpcode(), getOperands(inst));
         }
@@ -214,14 +251,19 @@ struct AvailableExpr{
       IN[&basic_block] = allExprs;
     }
 
-
+    /*
     std::cout << "Available Expressions GEN SETS!" << std::endl;
     for(auto& basic_block : F){
       for(auto& aExpr : genSets[&basic_block]){
-        errs() << *(aExpr.instruction) << " | "<< *(aExpr.operands.at(0)) << " " << *(aExpr.operands.at(1)) << "\n";
+        errs() << *(aExpr.instruction) << " | ";
+        for(auto& op: aExpr.operands){
+          errs() << *(op) << " ";
+        }
+        errs() << "\n";
+        
       }
       errs() << "b--------\n";
-    }
+    }*/
 
 
 
@@ -251,6 +293,8 @@ struct AvailableExpr{
           }
 
           IN[&basic_block] = std::move(intersection);
+
+          /*
           std::cout << "Available Expressions COMPUTED INS!" << std::endl;
           for(auto& basic_block : F){
             for(auto& aExpr : IN[&basic_block]){
@@ -262,7 +306,7 @@ struct AvailableExpr{
               
             }
             errs() << "b--------\n";
-          }
+          }*/
         }
 
         //compute difference
@@ -313,17 +357,39 @@ struct ReachingDefs{
     for(auto &basic_block : F){
       for(auto &instruction : basic_block){
           // skip instructions that do not define a value
-          if(instruction.getType()->isVoidTy()) continue;
+          if(!instruction.getType()->isVoidTy()){
 
-          // add instruction to GEN set
-          genSets[&basic_block].emplace(&instruction, &instruction);
+            // add instruction to GEN set
+            genSets[&basic_block].emplace(&instruction, &instruction);
+          }
+
+          if (auto *SI = dyn_cast<StoreInst>(&instruction)) {
+            genSets[&basic_block].emplace(&instruction, &instruction);  // treat store as a def
+          }
       }
     }
 
 
     //Generate KILL sets
-    for(auto& basic_block : F){
-      killSets[&basic_block] = {};
+    for (auto &basic_block : F) {
+        for(auto& instruction : basic_block){
+          if (auto *SI = dyn_cast<StoreInst>(&instruction)) {
+              Value *storedPtr = SI->getPointerOperand();
+
+              for (auto &def : allDefs) {
+                  
+
+                  if (auto *PrevStore = dyn_cast<StoreInst>(def.instruction)) {
+                    if (PrevStore == SI) continue;
+                    const Value *previousDef = PrevStore->getPointerOperand();
+
+                    if (previousDef == storedPtr) {
+                        killSets[&basic_block].emplace(&instruction,&instruction);
+                    }
+                }
+              }
+          }
+        }
     }
 
     //Actual reaching definition pass here
