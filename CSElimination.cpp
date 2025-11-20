@@ -426,6 +426,8 @@ bool runOnFunction(Function &F) override {
       errs() << "b--------\n";
     }
     errs() << "---------------------\n"; 
+    errs() << "Data Flow Analysis Complete\n"; 
+    errs() << "---------------------\n"; 
     std::vector<ReplacementTask> tasks;
 
     //forward traversal, one pass
@@ -449,7 +451,7 @@ bool runOnFunction(Function &F) override {
           if(def.instruction == aExpr.instruction) continue;
 
           std::cout << "Found instruction to change!" << std::endl;
-
+          changed = true;
           //if rhs is equal, add to list of instructions to change later
           instructionsToChange.push_back(def.instruction);
         }
@@ -460,6 +462,10 @@ bool runOnFunction(Function &F) override {
       }
     }
 
+    errs() << "---------------------\n"; 
+    errs() << "Finding Common Subexpressions Complete\n"; 
+    errs() << "---------------------\n"; 
+    
     std::vector<Instruction*> deleteList;
 
     if(tasks.size() == 0) return true;
@@ -508,12 +514,8 @@ bool runOnFunction(Function &F) override {
           ++it;
       }
     }
-
-    for(auto& basic_block : F){
-      for(auto& instruction : basic_block){
-        errs() << instruction << "\n";
-      }  
-    }
+    errs()<<F;
+    return changed;
     
 }
 }; // end of struct CSElimination
