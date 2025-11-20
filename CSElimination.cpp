@@ -446,6 +446,7 @@ bool runOnFunction(Function &F) override {
           
           if(!(defExpr == aExpr)) continue;
           if (!isPureIntegerOp(def.instruction)) continue;   // only include pure integer operations
+          if(def.instruction == aExpr.instruction) continue;
 
           std::cout << "Found instruction to change!" << std::endl;
 
@@ -461,14 +462,14 @@ bool runOnFunction(Function &F) override {
 
     std::vector<Instruction*> deleteList;
 
-    if(tasks.size() > 0) {
-      llvm::IRBuilder<> entryBuilder(&F.getEntryBlock(), F.getEntryBlock().begin());
-      llvm::AllocaInst* tmpPtr = entryBuilder.CreateAlloca(
-          llvm::Type::getInt32Ty(F.getContext()), // type: i32
-          nullptr,                                // optional array size
-          "tmp"                                    // name
-      );
-    }
+    if(tasks.size() == 0) return true;
+
+    llvm::IRBuilder<> entryBuilder(&F.getEntryBlock(), F.getEntryBlock().begin());
+    llvm::AllocaInst* tmpPtr = entryBuilder.CreateAlloca(
+        llvm::Type::getInt32Ty(F.getContext()), // type: i32
+        nullptr,                                // optional array size
+        "tmp"                                    // name
+    );
 
     for (auto &task : tasks) {
 
@@ -477,21 +478,26 @@ bool runOnFunction(Function &F) override {
       errs() << "Replacing instruction! " << *(task.expr.instruction)<<" \n";
       // Create the new T
 
-      //dont compare operands stored, instead, rederive them!!!
-      Instruction *T = BinaryOperator::Create(
-          (Instruction::BinaryOps)task.expr.opcode,
-          task.expr.instruction->getOperand(0),
-          task.expr.instruction->getOperand(1)
-      );
-      T->setName("tmp");
+      IRBuilder<> storeBuilder(rep->getNextNode());
+      StoreInst* ST = storeBuilder.CreateStore(rep, tmpPtr);
 
-      T->insertBefore(rep);
+      //Load stored value
+      IRBuilder<> builder(ST->getNextNode());
+      LoadInst *L = builder.CreateLoad(
+        Type::getInt32Ty(F.getContext()),
+        tmpPtr
+      );
+
+      rep->replaceAllUsesWith(L);
+      ST->setOperand(0, rep);
+
 
       // Replace all redundant expressions with T
+      /*
       for (Instruction *I : task.redundants) {
           I->replaceAllUsesWith(T);
           deleteList.push_back(I);
-      }
+      }*/
     }
 
     for(auto it = deleteList.begin(); it != deleteList.end(); ){
@@ -501,6 +507,12 @@ bool runOnFunction(Function &F) override {
       } else {
           ++it;
       }
+    }
+
+    for(auto& basic_block : F){
+      for(auto& instruction : basic_block){
+        errs() << instruction << "\n";
+      }  
     }
     
 }
