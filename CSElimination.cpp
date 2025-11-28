@@ -301,20 +301,6 @@ struct AvailableExpr{
           }
 
           IN[&basic_block] = std::move(intersection);
-
-          /*
-          std::cout << "Available Expressions COMPUTED INS!" << std::endl;
-          for(auto& basic_block : F){
-            for(auto& aExpr : IN[&basic_block]){
-              errs() << *(aExpr.instruction) << " | ";
-              for(auto& op : aExpr.operands){
-                errs() << *(op) << " ";
-              }
-              errs() << "\n";
-              
-            }
-            errs() << "b--------\n";
-          }*/
         }
 
         //compute difference
