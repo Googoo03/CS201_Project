@@ -12,6 +12,7 @@
 #include <fstream>
 #include <unordered_map>
 #include <set>
+#include <unordered_set>
 #include <queue>
 
 using namespace llvm;
@@ -87,28 +88,44 @@ struct ExpressionHash {
     }
 };
 
-bool Used(llvm::BasicBlock* node, Expression expr){
-  //For a given expression, return true if the block evaluates the expression
 
-}
+std::vector<llvm::Value*> getOperands(llvm::Instruction& instruction){
+  std::vector<llvm::Value*> ops;
+    for(unsigned i = 0; i < instruction.getNumOperands(); ++i) {
+        // Skip non-value operands (like block addresses, metadata)
+        llvm::Value* operand = instruction.getOperand(i);
+        if (isa<BasicBlock>(operand)) continue;
+        if (isa<MetadataAsValue>(operand)) continue;
+        if (isa<Function>(operand) && isa<CallBase>(instruction)) continue;
 
-
-struct Earliestness{
-
-    std::unordered_map<llvm::BasicBlock*, std::unordered_set<Expression, ExpressionHash>> IN;
-    std::unordered_map<llvm::BasicBlock*, std::unordered_set<Expression, ExpressionHash>> OUT;
-
-    std::unordered_map<llvm::BasicBlock*, std::unordered_set<Expression, ExpressionHash>> killSets;
-    std::unordered_map<llvm::BasicBlock*, std::unordered_set<Expression, ExpressionHash>> genSets;
-
-
-    Earliestness();
-    ~Earliestness();
-
-    void runEarliestness(Function& F, std::unordered_set<Expression, ExpressionHash>& allExprs){
+        LoadInst* load = dyn_cast<LoadInst>((&instruction)->getOperand(i));
+        if(load){
+          ops.push_back(load->getPointerOperand());
+        }else{
+          ops.push_back((&instruction)->getOperand(i));          
+        }
         
     }
-};
+    return ops;
+}
+
+bool isPureIntegerOp(Instruction *I) {
+    
+    switch (I->getOpcode()) {
+        case Instruction::Add:
+        case Instruction::Sub:
+        case Instruction::Mul:
+        case Instruction::And:
+        case Instruction::Or:
+        case Instruction::Xor:
+        case Instruction::Shl:
+        case Instruction::LShr:
+        case Instruction::AShr:
+            return true;
+        default:
+            return false;
+    }
+}
 
 struct DownSafety{
 
@@ -237,6 +254,123 @@ struct DownSafety{
           //set changes based on if theres any differences in the sets
           if(oldIN != IN[&basic_block] || oldOUT != OUT[&basic_block]){
             errs() << "Down Safety CHANGED **************************\n"; 
+            changes = true;
+          }
+
+        }
+      }
+
+    }
+};
+
+struct Earliestness{
+
+    std::unordered_map<llvm::BasicBlock*, std::unordered_set<Expression, ExpressionHash>> EARLY;
+
+    std::unordered_map<llvm::BasicBlock*, std::unordered_set<Expression, ExpressionHash>> killSets;
+    std::unordered_map<llvm::BasicBlock*, std::unordered_set<Expression, ExpressionHash>> NOTDSAFE;
+
+
+    Earliestness();
+    ~Earliestness();
+
+    void runEarliestness(Function& F, std::unordered_set<Expression, ExpressionHash>& allExprs, DownSafety& DSAFE){
+        
+
+      //Kill sets ( ALSO IS NOT(TRANSP) )
+      //any expression in which the operands are redefined in the block
+      for (auto &basic_block : F) {
+          for(auto& instruction : basic_block){
+            if (auto *SI = dyn_cast<StoreInst>(&instruction)) {
+                Value *storedPtr = SI->getPointerOperand();
+
+                for (auto &expr : allExprs) {
+                    bool containsLoad = false;
+                    if(isa<LoadInst>(expr.instruction)) containsLoad = true;
+
+                    for(int i = 0; i < expr.instruction->getNumOperands(); ++i){
+                      LoadInst* load = dyn_cast<LoadInst>((expr.instruction)->getOperand(i));
+                      if(load) containsLoad = true;
+                    }
+
+                    if (!containsLoad)
+                        continue;
+
+                    for(auto& op : expr.operands){
+                      if(Expression::sameValue(op,storedPtr)){
+                        killSets[&basic_block].insert(expr);
+                        break;
+                      }
+                    }
+
+
+                }
+            }
+          }
+      }
+
+      //Calculate NOTDSAFE, since we are working with sets, just do (allExprs - DSAFE). We are working with the beginning of the block
+      //so let's use IN from DSAFE
+      for(auto& basic_block : F){
+        //compute difference
+        std::unordered_set<Expression, ExpressionHash> diff;
+        for(Expression expr : allExprs){
+          if(DSAFE.IN[&basic_block].find(expr) == DSAFE.IN[&basic_block].end()){
+            diff.insert(expr);
+          }
+        }
+
+        NOTDSAFE[&basic_block] = std::move(diff);
+      }
+
+      //No IN and OUT sets, no need to initialize
+
+      //Actual pass
+      bool changes = true;
+      while(changes){
+        changes = false;
+        //compute the in and out sets of each block
+        for(auto& basic_block : F){
+
+          //If no predecessors, ie is the start block, then automatically true (all expressions)
+          if(std::distance(pred_begin(&basic_block), pred_end(&basic_block)) == 0){
+            EARLY[&basic_block] = allExprs;
+            continue;
+          }
+
+          //to store the final result
+          std::unordered_set<Expression, ExpressionHash> oldResult = EARLY[&basic_block];
+
+          //compute union over all predecessors
+          for(auto i = pred_begin(&basic_block); i != pred_end(&basic_block); ++i){
+
+            //compute intersection of NOTDSAFE & Earliest
+            std::unordered_set<Expression, ExpressionHash> intersection = NOTDSAFE[&basic_block];
+
+            for (auto it = intersection.begin(); it != intersection.end(); ) {
+                if (!EARLY[&basic_block].count(*it)) {
+                    it = intersection.erase(it);   // remove expressions not in this pred
+                } else {
+                    ++it;
+                }
+            }
+
+            //compute union with kill
+            std::unordered_set<Expression, ExpressionHash> result = killSets[&basic_block];
+            for(Expression expr : intersection){
+              result.insert(expr);
+            }
+
+            //lastly, union the iterative result with the final result
+            for(Expression expr : result){
+              EARLY[&basic_block].insert(expr);
+            }
+
+          }
+
+          //set changes based on if theres any differences in the sets
+          if(oldResult != EARLY[&basic_block]){
+            errs() << "Earliestness CHANGED **************************\n"; 
             changes = true;
           }
 
