@@ -1,4 +1,6 @@
 #include "llvm/Pass.h"
+#include "llvm/IR/Value.h"        
+#include "llvm/Support/Casting.h" 
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Function.h"
 #include "llvm/Support/raw_ostream.h"
@@ -10,10 +12,12 @@
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include <string>
 #include <fstream>
+#include <iostream>
 #include <unordered_map>
 #include <set>
 #include <unordered_set>
 #include <queue>
+#include <vector>
 
 using namespace llvm;
 using namespace std;
@@ -88,6 +92,27 @@ struct ExpressionHash {
     }
 };
 
+struct Definition{
+  llvm::Instruction* instruction;
+  llvm::Value* variable; //where its being written
+
+  Definition(llvm::Instruction* instr, llvm::Value* var): instruction(instr), variable(var){}
+
+  bool operator<(const Definition& other) const {
+        return variable < other.variable;
+  }
+
+  bool operator==(const Definition& other) const {
+      return variable == other.variable;
+  }
+};
+
+struct DefinitionHash {
+    size_t operator()(Definition const& d) const noexcept {
+        return std::hash<void*>()(d.variable) ^
+               (std::hash<void*>()(d.instruction) << 1);
+    }
+};
 
 std::vector<llvm::Value*> getOperands(llvm::Instruction& instruction){
   std::vector<llvm::Value*> ops;
@@ -135,8 +160,8 @@ struct DownSafety{
     std::unordered_map<llvm::BasicBlock*, std::unordered_set<Expression, ExpressionHash>> Transp;
     std::unordered_map<llvm::BasicBlock*, std::unordered_set<Expression, ExpressionHash>> Used;
 
-    DownSafety();
-    ~DownSafety();
+    DownSafety(){}
+    ~DownSafety(){}
 
     void runDownSafety(Function& F, std::unordered_set<Expression, ExpressionHash>& allExprs){
       //generate Used set. Contains all expressions that are computed (used) in the block
@@ -271,8 +296,8 @@ struct Earliestness{
     std::unordered_map<llvm::BasicBlock*, std::unordered_set<Expression, ExpressionHash>> NOTDSAFE;
 
 
-    Earliestness();
-    ~Earliestness();
+    Earliestness(){}
+    ~Earliestness(){}
 
     void runEarliestness(Function& F, std::unordered_set<Expression, ExpressionHash>& allExprs, DownSafety& DSAFE){
         
@@ -386,11 +411,60 @@ struct PRElimination : public FunctionPass
   PRElimination() : FunctionPass(ID) {}
 
   bool runOnFunction(Function &F) override
-  {
+  { 
+    errs() << "Process has started!";
+    DownSafety DSAFE;
+    Earliestness EA;
+
+    bool changed = false;
+
+    std::unordered_set<Expression, ExpressionHash> allExprs;
+    std::unordered_set<Definition, DefinitionHash> allDefs;
+
+    //need all definitions and expressions regardless of block
+    for(auto &basic_block : F){
+      for(auto& instruction : basic_block){
+        //check if the current instruction is a definition.
+
+        if(!instruction.getType()->isVoidTy() || isa<StoreInst>(instruction)){
+            allDefs.emplace(&instruction,&instruction);
+        }
+        
+        if(!instruction.getType()->isVoidTy()){
+            allExprs.emplace(&instruction,instruction.getOpcode(), getOperands(instruction));
+        }
+
+      }
+    }
+
+    //Just do this once, is ran for all blocks
+    DSAFE.runDownSafety(F,allExprs);
+    errs()  << "Down Safety has run!";
+    for(auto& basic_block : F){
+      for(auto& Safe : DSAFE.IN[&basic_block]){
+        errs() << *(Safe.instruction) << "\n";
+      }
+      errs() << "b--------\n";
+    }
+
+    EA.runEarliestness(F,allExprs,DSAFE);
+    errs() << "Earliestness has run!";
+    for(auto& basic_block : F){
+      for(auto& def : EA.EARLY[&basic_block]){
+        errs() << *(def.instruction) << "\n";
+      }
+      errs() << "b--------\n";
+    }
+
+    errs() << "---------------------\n"; 
+    errs() << "Data Flow Analysis Complete\n"; 
+    errs() << "---------------------\n";  
+
     errs() << "PRElimination: ";
     errs() << F.getName() << "\n";
-
-    return true;
+    errs() << F;
+    changed = true;
+    return changed;
   }
 }; // end of struct PRElimination
 } // end of anonymous namespace
