@@ -456,6 +456,54 @@ struct PRElimination : public FunctionPass
       errs() << "b--------\n";
     }
 
+    //Need to compute the transformations
+
+    //Find where DSAFE ^ EARLY is true for each expression.
+    //When true, add task to transform
+    for(auto& basic_block : F){
+
+      //may have to change IN to be something else
+      for(auto& dsExpr : DSAFE.IN[&basic_block]){
+
+        std::vector<Instruction*> instructionsToChange;
+
+        for(auto& eExpr : EA.EARLY[&basic_block]){
+          
+          if(!(eExpr == dsExpr)) continue;
+          if (!isPureIntegerOp(eExpr.instruction)) continue;   // only include pure integer operations
+          if(eExpr.instruction == dsExpr.instruction) continue;
+
+          std::cout << "Found instruction to change!" << std::endl;
+          changed = true;
+          //if rhs is equal, add to list of instructions to change later
+          instructionsToChange.push_back(eExpr.instruction);
+
+        }
+        
+        //dont know if we need this, test without first
+        /*if (instructionsToChange.size() > 1) */tasks.push_back(ReplacementTask(instructionsToChange,dsExpr));
+
+      } 
+
+    }
+
+    std::vector<Instruction*> deleteList;
+
+    if(tasks.size() == 0) return true;
+
+    
+    //Tasks to transform
+    //add a new temp variable alloca
+    //
+    //When replacing, there will be 2 loads and a binary operation
+    //Keep the loads (we did it in CSE) and instead store the resulting value in corresponding temp var
+    //
+    //Find every occurence of expression use that is not temp
+    //Replace with a load from temp
+    //Delete all mentioned occurences of expression
+
+
+
     errs() << "---------------------\n"; 
     errs() << "Data Flow Analysis Complete\n"; 
     errs() << "---------------------\n";  
