@@ -284,7 +284,7 @@ struct DownSafety{
           //compute in = used u (transp ^ out)
           IN[&basic_block] = Used[&basic_block];
           for(Expression expr : instersectionTranspOUT){
-            IN[&basic_block].insert(expr);
+            IN[&basic_block].emplace(expr.instruction,expr.instruction->getOpcode(),getOperands(*(expr.instruction)));
           }
 
           
@@ -522,9 +522,46 @@ struct PRElimination : public FunctionPass
       );
 
       for(auto& red : task.redundants){
-        errs() << red << "\n";
+        errs() << *red << "\n";
         errs() << "b--------\n";
       }
+
+      Instruction *rep = task.expr.instruction; //original to consider
+
+      //store in temp var
+      for(auto& instruction : task.redundants){
+        IRBuilder<> storeBuilder(instruction->getNextNode());
+        StoreInst* ST = storeBuilder.CreateStore(instruction, tmpPtr);
+
+
+        //Load stored value
+        IRBuilder<> builder(ST->getNextNode());
+        LoadInst *L = builder.CreateLoad(
+          Type::getInt32Ty(F.getContext()),
+          tmpPtr
+        );
+
+        instruction->replaceAllUsesWith(L);
+        ST->setOperand(0, instruction);
+      }
+
+      for(auto& expr: allExprs){
+        if(expr != task.expr) continue;
+
+        auto findExpr = std::find(task.redundants.begin(), task.redundants.end(), expr.instruction);
+        if(findExpr != task.redundants.end()) continue;
+
+        IRBuilder<> builder(expr.instruction->getNextNode());
+        LoadInst *L = builder.CreateLoad(
+          Type::getInt32Ty(F.getContext()),
+          tmpPtr
+        );
+
+        expr.instruction->replaceAllUsesWith(L);
+      }
+
+      //load temp for each occurrence of expression
+
 
     }
     
