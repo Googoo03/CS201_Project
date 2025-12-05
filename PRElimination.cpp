@@ -114,6 +114,15 @@ struct DefinitionHash {
     }
 };
 
+struct ReplacementTask {
+  std::vector<Instruction*> redundants;    // all others that compute B op C
+  Expression expr;
+
+  ReplacementTask(std::vector<Instruction*>& redun_, Expression expr_):
+  redundants(redun_),
+  expr(expr_){}
+};
+
 std::vector<llvm::Value*> getOperands(llvm::Instruction& instruction){
   std::vector<llvm::Value*> ops;
     for(unsigned i = 0; i < instruction.getNumOperands(); ++i) {
@@ -239,30 +248,34 @@ struct DownSafety{
           std::unordered_set<Expression,ExpressionHash> oldIN = IN[&basic_block];
           std::unordered_set<Expression,ExpressionHash> oldOUT = OUT[&basic_block];
 
-          //OUT is the intersection of all predecessors
-          if(std::distance(succ_begin(&basic_block), succ_end(&basic_block)) > 0){
-            
-            std::unordered_set<Expression, ExpressionHash> intersection = IN[*succ_begin(&basic_block)];
-
-            for(auto i = succ_begin(&basic_block); i != succ_end(&basic_block); ++i){
-              for (auto it = intersection.begin(); it != intersection.end(); ) {
-                  if (!OUT[*i].count(*it)) {
-                      it = intersection.erase(it);   // remove expressions not in this pred
-                  } else {
-                      ++it;
-                  }
-              }
-            }
-
-            OUT[&basic_block] = std::move(intersection);
+          //if not successors. ie is the exit block, then Down Safe is false for all expressions (empty)
+          if(std::distance(succ_begin(&basic_block), succ_end(&basic_block)) == 0){
+            OUT[&basic_block] = {};
+            continue;
           }
 
+          //OUT is the intersection of all predecessors
+            
+          std::unordered_set<Expression, ExpressionHash> intersection = IN[*succ_begin(&basic_block)];
+
+          for(auto i = succ_begin(&basic_block); i != succ_end(&basic_block); ++i){
+            for (auto it = intersection.begin(); it != intersection.end(); ) {
+                if (!OUT[*i].count(*it)) {
+                    it = intersection.erase(it);   // remove expressions not in this pred
+                } else {
+                    ++it;
+                }
+            }
+          }
+
+          OUT[&basic_block] = std::move(intersection);
+
           //compute Transp ^ OUT
-          std::unordered_set<Expression, ExpressionHash> intersection = Transp[&basic_block];
+          std::unordered_set<Expression, ExpressionHash> instersectionTranspOUT = Transp[&basic_block];
           
-          for (auto it = intersection.begin(); it != intersection.end(); ) {
+          for (auto it = instersectionTranspOUT.begin(); it != instersectionTranspOUT.end(); ) {
               if (!OUT[&basic_block].count(*it)) {
-                  it = intersection.erase(it);   // remove expressions not in this pred
+                  it = instersectionTranspOUT.erase(it);   // remove expressions not in this pred
               } else {
                   ++it;
               }
@@ -270,7 +283,7 @@ struct DownSafety{
 
           //compute in = used u (transp ^ out)
           IN[&basic_block] = Used[&basic_block];
-          for(Expression expr : intersection){
+          for(Expression expr : instersectionTranspOUT){
             IN[&basic_block].insert(expr);
           }
 
@@ -365,15 +378,16 @@ struct Earliestness{
 
           //to store the final result
           std::unordered_set<Expression, ExpressionHash> oldResult = EARLY[&basic_block];
+          EARLY[&basic_block] = {};
 
           //compute union over all predecessors
           for(auto i = pred_begin(&basic_block); i != pred_end(&basic_block); ++i){
 
-            //compute intersection of NOTDSAFE & Earliest
-            std::unordered_set<Expression, ExpressionHash> intersection = NOTDSAFE[&basic_block];
+            //compute intersection of NOTDSAFE & Earliest MUST BE PREDECESSOR
+            std::unordered_set<Expression, ExpressionHash> intersection = NOTDSAFE[*i];
 
             for (auto it = intersection.begin(); it != intersection.end(); ) {
-                if (!EARLY[&basic_block].count(*it)) {
+                if (!EARLY[*i].count(*it)) {
                     it = intersection.erase(it);   // remove expressions not in this pred
                 } else {
                     ++it;
@@ -439,7 +453,7 @@ struct PRElimination : public FunctionPass
 
     //Just do this once, is ran for all blocks
     DSAFE.runDownSafety(F,allExprs);
-    errs()  << "Down Safety has run!";
+    errs()  << "Down Safety has run!\n";
     for(auto& basic_block : F){
       for(auto& Safe : DSAFE.IN[&basic_block]){
         errs() << *(Safe.instruction) << "\n";
@@ -448,7 +462,7 @@ struct PRElimination : public FunctionPass
     }
 
     EA.runEarliestness(F,allExprs,DSAFE);
-    errs() << "Earliestness has run!";
+    errs() << "Earliestness has run!\n";
     for(auto& basic_block : F){
       for(auto& def : EA.EARLY[&basic_block]){
         errs() << *(def.instruction) << "\n";
@@ -457,6 +471,7 @@ struct PRElimination : public FunctionPass
     }
 
     //Need to compute the transformations
+    std::vector<ReplacementTask> tasks;
 
     //Find where DSAFE ^ EARLY is true for each expression.
     //When true, add task to transform
@@ -469,12 +484,17 @@ struct PRElimination : public FunctionPass
 
         for(auto& eExpr : EA.EARLY[&basic_block]){
           
-          if(!(eExpr == dsExpr)) continue;
-          if (!isPureIntegerOp(eExpr.instruction)) continue;   // only include pure integer operations
-          if(eExpr.instruction == dsExpr.instruction) continue;
+          if(!(eExpr == dsExpr)){
+            errs() << "== Skipping | " << *(dsExpr.instruction) << " | " << *(eExpr.instruction) << "\n";
+            continue;
+          }
+          if (!isPureIntegerOp(eExpr.instruction)){
+            errs() << "Skipping | " << *(dsExpr.instruction) << " | " << *(eExpr.instruction) << "\n";
+            continue;   // only include pure integer operations
+          }
+          
 
-          std::cout << "Found instruction to change!" << std::endl;
-          changed = true;
+          errs() << "Found! \n";
           //if rhs is equal, add to list of instructions to change later
           instructionsToChange.push_back(eExpr.instruction);
 
@@ -491,6 +511,22 @@ struct PRElimination : public FunctionPass
 
     if(tasks.size() == 0) return true;
 
+    for(auto& task : tasks){
+
+      //allocate new tmp var at top
+      llvm::IRBuilder<> entryBuilder(&F.getEntryBlock(), F.getEntryBlock().begin());
+      llvm::AllocaInst* tmpPtr = entryBuilder.CreateAlloca(
+          llvm::Type::getInt32Ty(F.getContext()), // type: i32
+          nullptr,                                // optional array size
+          "tmp"                                    // name
+      );
+
+      for(auto& red : task.redundants){
+        errs() << red << "\n";
+        errs() << "b--------\n";
+      }
+
+    }
     
     //Tasks to transform
     //add a new temp variable alloca
