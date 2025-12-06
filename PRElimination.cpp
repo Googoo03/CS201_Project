@@ -433,23 +433,26 @@ struct PRElimination : public FunctionPass
     bool changed = false;
 
     std::unordered_set<Expression, ExpressionHash> allExprs;
-    std::unordered_set<Definition, DefinitionHash> allDefs;
 
     //need all definitions and expressions regardless of block
     for(auto &basic_block : F){
       for(auto& instruction : basic_block){
         //check if the current instruction is a definition.
-
-        if(!instruction.getType()->isVoidTy() || isa<StoreInst>(instruction)){
-            allDefs.emplace(&instruction,&instruction);
-        }
         
         if(!instruction.getType()->isVoidTy()){
+            errs() << instruction << "\n";
             allExprs.emplace(&instruction,instruction.getOpcode(), getOperands(instruction));
         }
 
       }
     }
+
+    errs() << "ALL EXPRESSIONS!\n";
+    for(auto& expr : allExprs){
+      errs() << *(expr.instruction) << "\n";
+      
+    }
+    errs() << "b--------\n";
 
     //Just do this once, is ran for all blocks
     DSAFE.runDownSafety(F,allExprs);
@@ -496,6 +499,8 @@ struct PRElimination : public FunctionPass
 
           errs() << "Found! \n";
           //if rhs is equal, add to list of instructions to change later
+
+          //place where we need a h=x+y
           instructionsToChange.push_back(eExpr.instruction);
 
         }
@@ -528,7 +533,7 @@ struct PRElimination : public FunctionPass
 
       Instruction *rep = task.expr.instruction; //original to consider
 
-      //store in temp var
+      //store in temp var: for each h=x+y, ... = h
       for(auto& instruction : task.redundants){
         IRBuilder<> storeBuilder(instruction->getNextNode());
         StoreInst* ST = storeBuilder.CreateStore(instruction, tmpPtr);
@@ -545,26 +550,46 @@ struct PRElimination : public FunctionPass
         ST->setOperand(0, instruction);
       }
 
-      for(auto& expr: allExprs){
-        if(expr != task.expr) continue;
+      //remaining ... = h
+      for(auto& basic_block : F){
+        for(auto& instruction : basic_block){
 
-        auto findExpr = std::find(task.redundants.begin(), task.redundants.end(), expr.instruction);
-        if(findExpr != task.redundants.end()) continue;
+          if(instruction.getType()->isVoidTy()) continue;
 
-        IRBuilder<> builder(expr.instruction->getNextNode());
-        LoadInst *L = builder.CreateLoad(
-          Type::getInt32Ty(F.getContext()),
-          tmpPtr
-        );
+          //make the expression out of the instruction
+          Expression expr(&instruction,instruction.getOpcode(),getOperands(instruction));
 
-        expr.instruction->replaceAllUsesWith(L);
+          //check if its the same, and doesnt exist in the list yet
+          if(expr != task.expr) continue;
+
+          auto findExpr = std::find(task.redundants.begin(), task.redundants.end(), expr.instruction);
+          if(findExpr != task.redundants.end()) continue;
+
+          IRBuilder<> builder(expr.instruction->getNextNode());
+          LoadInst *L = builder.CreateLoad(
+            Type::getInt32Ty(F.getContext()),
+            tmpPtr
+          );
+
+          expr.instruction->replaceAllUsesWith(L);
+
+          //delete rep
+          deleteList.push_back(expr.instruction);
+          
+        }
       }
-
-      //load temp for each occurrence of expression
 
 
     }
-    
+
+    for(auto it = deleteList.begin(); it != deleteList.end(); ){
+
+      if((*it)->use_empty() && (*it)->getParent()){
+          if(*it) (*it)->eraseFromParent();
+      } else {
+          ++it;
+      }
+    }
     //Tasks to transform
     //add a new temp variable alloca
     //
