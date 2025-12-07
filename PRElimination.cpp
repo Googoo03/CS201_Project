@@ -121,6 +121,12 @@ struct ReplacementTask {
   ReplacementTask(std::vector<Instruction*>& redun_, Expression expr_):
   redundants(redun_),
   expr(expr_){}
+
+  ReplacementTask(Expression expr_):expr(expr_){}
+
+  bool operator==(const ReplacementTask& other) const {
+      return expr == other.expr;
+  }
 };
 
 std::vector<llvm::Value*> getOperands(llvm::Instruction& instruction){
@@ -505,8 +511,16 @@ struct PRElimination : public FunctionPass
 
         }
         
-        //dont know if we need this, test without first
-        /*if (instructionsToChange.size() > 1) */tasks.push_back(ReplacementTask(instructionsToChange,dsExpr));
+        //if expr already exists, add to existing bucket instead
+        auto findExpr = std::find(tasks.begin(), tasks.end(), ReplacementTask(dsExpr));
+        if(findExpr != tasks.end()){
+          //add to existing bucket
+          findExpr->redundants.insert(findExpr->redundants.end(), instructionsToChange.begin(), instructionsToChange.end());
+          continue;
+        }else{
+
+          tasks.push_back(ReplacementTask(instructionsToChange,dsExpr));
+        }
 
       } 
 
@@ -526,6 +540,7 @@ struct PRElimination : public FunctionPass
           "tmp"                                    // name
       );
 
+      errs() << "REDUNDANTS\n";
       for(auto& red : task.redundants){
         errs() << *red << "\n";
         errs() << "b--------\n";
