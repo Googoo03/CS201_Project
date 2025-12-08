@@ -490,12 +490,12 @@ struct PRElimination : public FunctionPass
           if(!(eExpr == dsExpr)) continue;
           if (!isPureIntegerOp(eExpr.instruction)) continue;
           
-
+          errs() << "Block front: " << basic_block.front() << "\n";
           errs() << "Found! " << *(dsExpr.instruction) << " | " << *(eExpr.instruction) << "\n";
           //if rhs is equal, add to list of instructions to change later
 
           //place where we need a h=x+y
-          instructionsToChange.push_back(eExpr.instruction);
+          instructionsToChange.push_back(dsExpr.instruction);
 
         }
         
@@ -530,15 +530,15 @@ struct PRElimination : public FunctionPass
           "tmp"                                    // name
       );
 
-      std::sort(task.redundants.begin(), task.redundants.end());          // sort first
-      auto last = std::unique(task.redundants.begin(), task.redundants.end()); // move duplicates to the end
-      task.redundants.erase(last, task.redundants.end());                 // erase duplicates
+      // std::sort(task.redundants.begin(), task.redundants.end());          // sort first
+      // auto last = std::unique(task.redundants.begin(), task.redundants.end()); // move duplicates to the end
+      // task.redundants.erase(last, task.redundants.end());                 // erase duplicates
 
-      errs() << "REDUNDANTS\n";
-      for(auto& red : task.redundants){
-        errs() << *red << "\n";
-        errs() << "b--------\n";
-      }
+      // errs() << "REDUNDANTS\n";
+      // for(auto& red : task.redundants){
+      //   errs() << *red << "\n";
+      //   errs() << "b--------\n";
+      // }
 
       Instruction *rep = task.expr.instruction; //original to consider
 
