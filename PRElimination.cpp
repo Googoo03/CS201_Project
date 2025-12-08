@@ -16,6 +16,7 @@
 #include <unordered_map>
 #include <set>
 #include <unordered_set>
+#include <algorithm>
 #include <queue>
 #include <vector>
 
@@ -192,10 +193,12 @@ struct DownSafety{
             // Must be a pure, side-effect-free expression
             if (!isPureIntegerOp(&inst))
                 continue;
-
+            
             if((&inst)->getOpcode() == Instruction::Load){
-                auto *LI = dyn_cast<LoadInst>(&inst);
-                if (!(LI->isVolatile() || LI->isAtomic())) continue;
+                if (auto *LI = dyn_cast<LoadInst>(&inst)) {
+                    if (LI->isVolatile() || LI->isAtomic())
+                        continue; // not pure
+                }
             }
 
             Used[&basic_block].emplace(&inst,inst.getOpcode(), getOperands(inst));
@@ -203,25 +206,14 @@ struct DownSafety{
       }
 
       //generate Transp set. Contains all expressions that are not killed by the block
-
       for (auto &basic_block : F) {
-        for(auto& instruction : basic_block){
-          if (auto *SI = dyn_cast<StoreInst>(&instruction)) {
-              Value *storedPtr = SI->getPointerOperand();
+        for (auto &expr : allExprs) {
+          bool killed = false;
 
-              for (auto &expr : allExprs) {
-                  bool containsLoad = false;
-                  bool killed = false;
-                  if(isa<LoadInst>(expr.instruction)) containsLoad = true;
+          for (auto &inst : basic_block) {
+              if (auto *SI = dyn_cast<StoreInst>(&inst)) {
 
-                  for(int i = 0; i < expr.instruction->getNumOperands(); ++i){
-                    LoadInst* load = dyn_cast<LoadInst>((expr.instruction)->getOperand(i));
-                    if(load) containsLoad = true;
-                  }
-
-                  if (!containsLoad)
-                      continue;
-
+                  Value *storedPtr = SI->getPointerOperand();
                   for(auto& op : expr.operands){
                     if(Expression::sameValue(op,storedPtr)){
 
@@ -230,12 +222,13 @@ struct DownSafety{
                       break;
                     }
                   }
-
-                  if(!killed) Transp[&basic_block].insert(expr);
               }
           }
-        }
+
+          if (!killed)
+              Transp[&basic_block].insert(expr);
       }
+    }
 
       //Initialize IN & OUT sets.
       for(auto& basic_block : F){
@@ -243,6 +236,7 @@ struct DownSafety{
         if(std::distance(succ_begin(&basic_block), succ_end(&basic_block)) > 0){
           OUT[&basic_block] = allExprs;
         }
+        IN[&basic_block] = {};
       }
 
       //Actual pass
@@ -266,7 +260,7 @@ struct DownSafety{
 
           for(auto i = succ_begin(&basic_block); i != succ_end(&basic_block); ++i){
             for (auto it = intersection.begin(); it != intersection.end(); ) {
-                if (!OUT[*i].count(*it)) {
+                if (!IN[*i].count(*it)) {
                     it = intersection.erase(it);   // remove expressions not in this pred
                 } else {
                     ++it;
@@ -493,17 +487,11 @@ struct PRElimination : public FunctionPass
 
         for(auto& eExpr : EA.EARLY[&basic_block]){
           
-          if(!(eExpr == dsExpr)){
-            errs() << "== Skipping | " << *(dsExpr.instruction) << " | " << *(eExpr.instruction) << "\n";
-            continue;
-          }
-          if (!isPureIntegerOp(eExpr.instruction)){
-            errs() << "Skipping | " << *(dsExpr.instruction) << " | " << *(eExpr.instruction) << "\n";
-            continue;   // only include pure integer operations
-          }
+          if(!(eExpr == dsExpr)) continue;
+          if (!isPureIntegerOp(eExpr.instruction)) continue;
           
 
-          errs() << "Found! \n";
+          errs() << "Found! " << *(dsExpr.instruction) << " | " << *(eExpr.instruction) << "\n";
           //if rhs is equal, add to list of instructions to change later
 
           //place where we need a h=x+y
@@ -515,6 +503,8 @@ struct PRElimination : public FunctionPass
         auto findExpr = std::find(tasks.begin(), tasks.end(), ReplacementTask(dsExpr));
         if(findExpr != tasks.end()){
           //add to existing bucket
+
+          //only add if the expression doesnt already exist in the bucket
           findExpr->redundants.insert(findExpr->redundants.end(), instructionsToChange.begin(), instructionsToChange.end());
           continue;
         }else{
@@ -539,6 +529,10 @@ struct PRElimination : public FunctionPass
           nullptr,                                // optional array size
           "tmp"                                    // name
       );
+
+      std::sort(task.redundants.begin(), task.redundants.end());          // sort first
+      auto last = std::unique(task.redundants.begin(), task.redundants.end()); // move duplicates to the end
+      task.redundants.erase(last, task.redundants.end());                 // erase duplicates
 
       errs() << "REDUNDANTS\n";
       for(auto& red : task.redundants){
