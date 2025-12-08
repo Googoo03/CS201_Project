@@ -494,7 +494,7 @@ struct PRElimination : public FunctionPass
           if(eExpr != expr) continue; //only work with a single expression for each task
           if (!isPureIntegerOp(eExpr.instruction)) continue;
           
-
+          errs() << "Block front: " << basic_block.front() << "\n";
           errs() << "Found! " << *(dsExpr.instruction) << " | " << *(eExpr.instruction) << "\n";
           //if rhs is equal, add to list of instructions to change later
 
