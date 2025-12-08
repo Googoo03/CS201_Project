@@ -118,10 +118,12 @@ struct DefinitionHash {
 struct ReplacementTask {
   std::vector<Instruction*> redundants;    // all others that compute B op C
   Expression expr;
+  std::vector<llvm::BasicBlock*> blocks;
 
-  ReplacementTask(std::vector<Instruction*>& redun_, Expression expr_):
+  ReplacementTask(std::vector<Instruction*>& redun_, Expression expr_, std::vector<llvm::BasicBlock*> blocks_):
   redundants(redun_),
-  expr(expr_){}
+  expr(expr_),
+  blocks(blocks_){}
 
   ReplacementTask(Expression expr_):expr(expr_){}
 
@@ -479,15 +481,17 @@ struct PRElimination : public FunctionPass
     //Find where DSAFE ^ EARLY is true for each expression.
     //When true, add task to transform
     for(auto& basic_block : F){
-
+      for(auto& expr: allExprs){
       //may have to change IN to be something else
       for(auto& dsExpr : DSAFE.IN[&basic_block]){
 
         std::vector<Instruction*> instructionsToChange;
+        std::vector<BasicBlock*> blocksToChange;
 
         for(auto& eExpr : EA.EARLY[&basic_block]){
           
-          if(!(eExpr == dsExpr)) continue;
+          if(!(eExpr == dsExpr)) continue; //make sure D^E
+          if(eExpr != expr) continue; //only work with a single expression for each task
           if (!isPureIntegerOp(eExpr.instruction)) continue;
           
 
@@ -496,6 +500,7 @@ struct PRElimination : public FunctionPass
 
           //place where we need a h=x+y
           instructionsToChange.push_back(eExpr.instruction);
+          blocksToChange.push_back(&basic_block);
 
         }
         
@@ -506,13 +511,15 @@ struct PRElimination : public FunctionPass
 
           //only add if the expression doesnt already exist in the bucket
           findExpr->redundants.insert(findExpr->redundants.end(), instructionsToChange.begin(), instructionsToChange.end());
+          findExpr->blocks.insert(findExpr->blocks.end(), blocksToChange.begin(), blocksToChange.end());
           continue;
         }else{
 
-          tasks.push_back(ReplacementTask(instructionsToChange,dsExpr));
+          tasks.push_back(ReplacementTask(instructionsToChange,dsExpr, blocksToChange));
         }
 
       } 
+    }
 
     }
 
@@ -530,10 +537,11 @@ struct PRElimination : public FunctionPass
           "tmp"                                    // name
       );
 
+      /*
       std::sort(task.redundants.begin(), task.redundants.end());          // sort first
       auto last = std::unique(task.redundants.begin(), task.redundants.end()); // move duplicates to the end
       task.redundants.erase(last, task.redundants.end());                 // erase duplicates
-
+      */
       errs() << "REDUNDANTS\n";
       for(auto& red : task.redundants){
         errs() << *red << "\n";
@@ -541,7 +549,36 @@ struct PRElimination : public FunctionPass
       }
 
       Instruction *rep = task.expr.instruction; //original to consider
+      std::vector<Instruction*> instrToSkip;
 
+      for(auto& block : task.blocks){
+        IRBuilder<> storeBuilder(&block->front());
+        //do 2 loads
+        // Duplicate loads
+        auto dupOp = [&](Value *op) -> Value* {
+            if (auto *L = dyn_cast<LoadInst>(op))
+                return storeBuilder.CreateLoad(L->getType(), L->getPointerOperand(), L->getName() + ".dup");
+            return op;
+        };
+
+        Value *A = dupOp(rep->getOperand(0));
+        Value *B = dupOp(rep->getOperand(1));
+
+        //compute
+        // Duplicate (%c = add a, b)
+        Value *newInst = storeBuilder.CreateBinOp(
+            static_cast<llvm::Instruction::BinaryOps>(rep->getOpcode()),
+            A,
+            B,
+            rep->getName() + ".dup"
+        );
+
+        instrToSkip.push_back(cast<llvm::Instruction>(newInst));
+
+        //store
+        StoreInst* ST = storeBuilder.CreateStore(newInst, tmpPtr);
+      }
+      /*
       //store in temp var: for each h=x+y, ... = h
       for(auto& instruction : task.redundants){
         IRBuilder<> storeBuilder(instruction->getNextNode());
@@ -557,9 +594,10 @@ struct PRElimination : public FunctionPass
 
         instruction->replaceAllUsesWith(L);
         ST->setOperand(0, instruction);
-      }
+      }*/
 
       //remaining ... = h
+      
       for(auto& basic_block : F){
         for(auto& instruction : basic_block){
 
@@ -571,8 +609,8 @@ struct PRElimination : public FunctionPass
           //check if its the same, and doesnt exist in the list yet
           if(expr != task.expr) continue;
 
-          auto findExpr = std::find(task.redundants.begin(), task.redundants.end(), expr.instruction);
-          if(findExpr != task.redundants.end()) continue;
+          auto findExpr = std::find(instrToSkip.begin(), instrToSkip.end(), &instruction);
+          if(findExpr != instrToSkip.end()) continue;
 
           IRBuilder<> builder(expr.instruction->getNextNode());
           LoadInst *L = builder.CreateLoad(
@@ -587,8 +625,6 @@ struct PRElimination : public FunctionPass
           
         }
       }
-
-
     }
 
     for(auto it = deleteList.begin(); it != deleteList.end(); ){
